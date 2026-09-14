@@ -16,6 +16,17 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$(cd "$HERE/.." && pwd)"
+
+# ── 数据根目录 ────────────────────────────────────────────────
+# 与 docker-compose.yml 读的是**同一个值**（.env 的 ZTIO_DATA_ROOT）。
+# 优先顺序：环境变量 > .env > 系统默认。改路径请只改 .env 一处。
+if [ -f "$SERVER_DIR/.env" ]; then
+    ENV_DATA_ROOT="$(sed -n 's/^ZTIO_DATA_ROOT=//p' "$SERVER_DIR/.env" | tail -1)"
+fi
+DATA_ROOT="${ZTIO_DATA_ROOT:-${ENV_DATA_ROOT:-/var/lib/ztio}}"
+DATA_DIR="$DATA_ROOT/one"
+DIST_DIR="$DATA_ROOT/dist"
+
 cd "$SERVER_DIR"
 
 BUILD=1
@@ -76,7 +87,7 @@ docker compose up -d
 # ------------------------------------------------------------
 # 3. 等待就绪
 # ------------------------------------------------------------
-TOKEN_FILE="$SERVER_DIR/data/one/authtoken.secret"
+TOKEN_FILE="$DATA_DIR/authtoken.secret"
 echo "==> 等待 controller 就绪"
 for i in $(seq 1 60); do
     if [ -f "$TOKEN_FILE" ] && curl -fsS -m 2 \
@@ -94,10 +105,10 @@ done
 # ------------------------------------------------------------
 echo "==> 验证 planet"
 
-PLANET="$SERVER_DIR/data/one/planet"
+PLANET="$DATA_DIR/planet"
 [ -f "$PLANET" ] || die "planet 不存在：$PLANET"
 
-python3 - "$PLANET" "$SERVER_DIR/data/one/identity.public" "$ZTIO_PUBLIC_IP4" "$ZT_PORT" <<'PY' || exit 1
+python3 - "$PLANET" "$DATA_DIR/identity.public" "$ZTIO_PUBLIC_IP4" "$ZT_PORT" <<'PY' || exit 1
 import ipaddress, sys
 
 planet_path, ident_path, expect_ip, expect_port = sys.argv[1:5]
@@ -158,7 +169,7 @@ PY
 # 5. 汇总
 # ------------------------------------------------------------
 FINGERPRINT="$(md5sum "$PLANET" | cut -d' ' -f1)"
-NODE_ADDR="$(cut -d: -f1 "$SERVER_DIR/data/one/identity.public")"
+NODE_ADDR="$(cut -d: -f1 "$DATA_DIR/identity.public")"
 
 echo
 echo "════════════════════════════════════════════════════════"
@@ -168,7 +179,7 @@ echo " 节点地址（= planet 的 root）  : $NODE_ADDR"
 echo " 世界 ID                       : 149604618（与官方相同，靠签名区分）"
 echo " 端点                          : $ZTIO_PUBLIC_IP4/$ZT_PORT"
 echo " planet md5                    : $FINGERPRINT"
-echo " 分发副本                      : $SERVER_DIR/data/dist/planet"
+echo " 分发副本                      : $DIST_DIR/planet"
 echo
   echo " 部署到此结束 —— planet 与 controller 已就绪。"
   echo " **不会自动创建任何网络** —— 第一个网络由你手动创建。"
@@ -182,7 +193,7 @@ echo
   echo "   docker compose exec ztplanet member.py pending"
   echo "   docker compose exec ztplanet member.py authorize <设备地址>"
 echo
-echo " 客户端接入：把 data/dist/planet 覆盖到设备的 ZeroTier 数据目录，"
+echo " 客户端接入：把 $DIST_DIR/planet 覆盖到设备的 ZeroTier 数据目录，"
 echo " 然后校验 md5 必须是 $FINGERPRINT"
 echo
 echo " 安全组只需放行：UDP $ZT_PORT 入站"

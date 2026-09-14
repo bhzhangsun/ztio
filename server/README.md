@@ -74,7 +74,7 @@ $EDITOR .env                    # 填 ZTIO_PUBLIC_IP4=你的公网 IP
 **首次启动时容器内部会自动**（`entrypoint.sh`）：
 
 1. 生成节点 identity
-2. 用 `mkworld` 按当前 identity + 你的公网 IP 生成 planet，同时放到 `data/dist/planet`
+2. 用 `mkworld` 按当前 identity + 你的公网 IP 生成 planet，同时放到 `/var/lib/ztio/dist/planet`
 3. 写 `local.conf`：`allowSecondaryPort:false`、`portMappingEnabled:false`、
    `allowManagementFrom:["127.0.0.1","::1"]` —— 把管理 API 锁在容器内
 4. 启动 `zerotier-one`
@@ -109,13 +109,13 @@ docker compose exec ztplanet ztnet.py rm --yes
 不带 nwid 时，controller 上只有一个网络就自动选它；有多个则**要求显式指定，不替你猜**。
 
 > 主机上如果有 git checkout，同一份脚本也能直接跑（`./scripts/ztnet.py ...`）——
-> 它自己找得到 token（容器内 `/var/lib/zerotier-one/`，主机上 `server/data/one/`）。
+> 它自己找得到 token（容器内 `/var/lib/zerotier-one/`，主机上 `/var/lib/ztio/one/`）。
 
 **controller 没有配置文件** —— 它自己的存储就是状态：
 
 ```
-data/one/controller.d/network/<16位nwid>.json            网络定义
-data/one/controller.d/network/<16位nwid>/member/*.json   成员授权
+/var/lib/ztio/one/controller.d/network/<16位nwid>.json            网络定义
+/var/lib/ztio/one/controller.d/network/<16位nwid>/member/*.json   成员授权
 ```
 
 那是 ZeroTier 的原生布局（`EmbeddedNetworkController` + `FileDB`），`backup.sh` 备份的就是它。
@@ -154,13 +154,13 @@ docker compose exec ztplanet member.py list                 # 全部成员与状
 ### 把 planet 发给客户端
 
 ```bash
-scp root@<服务器>:/path/to/server/data/dist/planet  ./planet
+scp root@<服务器>:/var/lib/ztio/dist/planet  ./planet
 ```
 
 各平台的确切路径、校验方法，以及**为什么官方 planet 的存在不会让自建 planet 失效**，
 见 [客户端接入](#客户端接入)。
 
-> planet 内容对所有人可见（它就是个公开的根列表），**但 `data/one/identity.secret`
+> planet 内容对所有人可见（它就是个公开的根列表），**但 `/var/lib/ztio/one/identity.secret`
 > 和 `current.c25519` 是密钥，绝对不能外传** —— `identity.secret` 泄露等于别人可以
 > 冒充你的 root。
 
@@ -209,7 +209,24 @@ server/
 | 在哪跑 | 怎么调 | 数据目录 |
 |---|---|---|
 | 容器内（推荐） | `docker compose exec ztplanet ztnet.py ...` | `/var/lib/zerotier-one/` |
-| 主机上（有 checkout 时） | `./scripts/ztnet.py ...` | `server/data/one/` |
+| 主机上（有 checkout 时） | `./scripts/ztnet.py ...` | `/var/lib/ztio/one/` |
+
+### ⚠️ 数据不在仓库里
+
+节点身份、planet 签名密钥、网络定义、分发用 planet —— **全部在 `/var/lib/ztio/`**，
+由 `.env` 的 `ZTIO_DATA_ROOT` 决定（compose 与主机脚本读的是**同一个值**，改一处即可）。
+
+```
+/var/lib/ztio/one/      ← 挂进容器的 /var/lib/zerotier-one
+/var/lib/ztio/dist/     ← 挂进容器的 /dist
+```
+
+**为什么不放在 `./data` 下**：gitignore 只防误提交，**防不了误删**。
+删代码目录、`git clean -xfd`、重做一次 checkout —— 任何一种都会连数据一起清掉，
+而 `identity.secret` 和 `current.c25519` 丢了就是全网设备永久失联、无法恢复。
+
+> 备份同理，落在 `/var/backups/ztio/`，也在仓库外。
+
 
 ---
 
@@ -295,7 +312,7 @@ prctl features), running as root
 
 **对系统的影响：没有。** 容器进程是 root，但那是**容器内的 root**，不是你主机上的 root ——
 没有 `--privileged`、没有 `CAP_NET_ADMIN`/`CAP_SYS_ADMIN`、没有 `/dev/net/tun`、
-用默认 seccomp 和自己的 namespace，且只有 `./data/one` 与 `./data/dist`
+用默认 seccomp 和自己的 namespace，且只有 `/var/lib/ztio/one` 与 `/var/lib/ztio/dist`
 两个目录被挂进来。
 
 唯一实际代价：少了一层纵深防御 —— 万一 ZeroTier 被攻破，攻击者拿到的是**容器内的 root**
@@ -330,8 +347,8 @@ prctl features), running as root
 所以唯一的事实来源是 ZeroTier 自己的存储：
 
 ```
-data/one/controller.d/network/<16位nwid>.json            网络定义（网段/DNS/路由/MTU）
-data/one/controller.d/network/<16位nwid>/member/*.json   每个成员一个文件
+/var/lib/ztio/one/controller.d/network/<16位nwid>.json            网络定义（网段/DNS/路由/MTU）
+/var/lib/ztio/one/controller.d/network/<16位nwid>/member/*.json   每个成员一个文件
 ```
 
 `backup.sh` 备份的就是它，有它就能完整恢复 —— 不需要再往 git 里放一份。
@@ -427,7 +444,7 @@ md5sum /var/lib/zerotier-one/planet       # 必须与 deploy.sh 输出的值一�
 
 ### 1. planet 的签名密钥绝对不能变
 
-`current.c25519` / `previous.c25519`（在 `data/one/` 下）是 planet 的签名密钥。
+`current.c25519` / `previous.c25519`（在 `/var/lib/ztio/one/` 下）是 planet 的签名密钥。
 节点替换 planet 的判据（`node/World.hpp:149`）：
 
 ```cpp
@@ -476,7 +493,7 @@ if ((_id == update._id) && (_ts < update._ts) && (_type == update._type)) {
 > ⚠️ 归档含 planet 签名私钥 —— 拿到它的人可以冒充你的 root 并签发世界更新。
 > 存到受控位置，不要进公开仓库。`backup.sh` 会把权限设为 600。
 
-**⚠️ 写在 `/var/backups/ztio/` 只是「不在仓库里」，不是「安全」。** 它和 `data/one/`
+**⚠️ 写在 `/var/backups/ztio/` 只是「不在仓库里」，不是「安全」。** 它和 `/var/lib/ztio/one/`
 在同一台机器上 —— 机器没了两份一起没。**必须定期把归档拷到本机或其他地方**：
 
 ```bash

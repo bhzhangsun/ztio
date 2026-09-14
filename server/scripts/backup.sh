@@ -24,8 +24,15 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$(cd "$HERE/.." && pwd)"
-DATA_DIR="${SERVER_DIR}/data/one"
-DIST_DIR="${SERVER_DIR}/data/dist"
+# ── 数据根目录 ────────────────────────────────────────────────
+# 与 docker-compose.yml 读的是**同一个值**（.env 的 ZTIO_DATA_ROOT）。
+# 优先顺序：环境变量 > .env > 系统默认。改路径请只改 .env 一处。
+if [ -f "$SERVER_DIR/.env" ]; then
+    ENV_DATA_ROOT="$(sed -n 's/^ZTIO_DATA_ROOT=//p' "$SERVER_DIR/.env" | tail -1)"
+fi
+DATA_ROOT="${ZTIO_DATA_ROOT:-${ENV_DATA_ROOT:-/var/lib/ztio}}"
+DATA_DIR="$DATA_ROOT/one"
+DIST_DIR="$DATA_ROOT/dist"
 BACKUP_DIR="${1:-/var/backups/ztio}"
 KEEP="${ZTIO_BACKUP_KEEP:-14}"
 

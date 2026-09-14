@@ -19,7 +19,7 @@
 | md5 | `dae4cd32e5f8fdfad25b6fabe1a26718` |
 | 网络 ID | `46e6a673718e988e`（前 10 位 = controller 地址 = root 地址） |
 
-来自 2026-09-14 的部署，和 `server/data/dist/planet` 逐字节一致。
+来自 2026-09-14 的部署，和 `/var/lib/ztio/dist/planet` 逐字节一致。
 
 ---
 
@@ -47,7 +47,7 @@
 **没有私钥，两重证据**：
 
 1. 偏移 248 是 `Identity` 结构的**私钥长度字段**，值是 `0` —— 这个结构本身就不带私钥
-2. 用 `data/one/identity.secret` 的**私钥段**（blob 的后 64 字节）全文和分片搜过，**零命中**
+2. 用 `/var/lib/ztio/one/identity.secret` 的**私钥段**（blob 的后 64 字节）全文和分片搜过，**零命中**
 
 > 注意 `identity.secret` 的 blob 是 `公钥(64B) + 私钥(64B)` 拼在一起的。
 > 只搜整段会命中**公钥段**（那是应该命中的，planet 必须含 root 公钥）。
@@ -99,9 +99,9 @@ return false;
 所以下面这三个文件**必须活着**，它们是「以后重新部署生成的 planet 仍被老用户接受」的唯一保证：
 
 ```
-server/data/one/identity.secret      root 身份；planet 里的 root 公钥就是它
-server/data/one/current.c25519       世界更新签名密钥
-server/data/one/previous.c25519      上一代，轮换时用
+/var/lib/ztio/one/identity.secret      root 身份；planet 里的 root 公钥就是它
+/var/lib/ztio/one/current.c25519       世界更新签名密钥
+/var/lib/ztio/one/previous.c25519      上一代，轮换时用
 ```
 
 `server/scripts/backup.sh` 会把它们连同 `controller.d` 一起打包，**默认写到 `/var/backups/ztio/`**
@@ -160,7 +160,7 @@ ZTS_API int ZTCALL zts_init_set_roots(const void* roots_data, unsigned int len);
 # 服务器上
 cd /root/ztio/server
 ./scripts/deploy.sh                 # 结束时会打印 planet md5
-cp data/dist/planet ../../planet/planet
+cp /var/lib/ztio/dist/planet ../../planet/planet
 
 # 本地校验
 md5sum planet/planet                # 必须与 deploy.sh 打印的一致

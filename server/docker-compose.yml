@@ -48,9 +48,13 @@ services:
     volumes:
       # 必须持久化。这里面是节点身份、planet 签名密钥、网络定义与成员授权。
       # 丢了 identity 或 c25519 密钥，全网设备都会失联且无法自动恢复。
-      - ./data/one:/var/lib/zerotier-one
+      #
+      # ⚠️ 落在**系统路径**（默认 /var/lib/ztio），不是仓库里。
+      # 放在 ./data 下即使 gitignore 了也只是防误提交 —— 删代码目录时会连数据一起删掉。
+      # 路径由 .env 的 ZTIO_DATA_ROOT 决定，compose 与主机脚本读的是同一个值。
+      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/one:/var/lib/zerotier-one
       # 对外分发的 planet。
-      - ./data/dist:/dist
+      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/dist:/dist
 
     # ------------------------------------------------------------
     # 刻意不写的东西

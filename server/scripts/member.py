@@ -29,34 +29,51 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 def find_token(explicit=None):
-    """authtoken.secret 的位置随运行环境不同 —— 两个都要能认出来。
+    """authtoken.secret 的位置随运行环境不同 —— 三个都要能认出来。
 
         容器内   /var/lib/zerotier-one/authtoken.secret   （ZT_HOME 默认值）
-        主机上   <checkout>/server/data/one/authtoken.secret
+        主机上   $ZTIO_DATA_ROOT/one/authtoken.secret      （默认 /var/lib/ztio）
 
-    所以脚本在容器里（docker compose exec planet ztnet.py ...）和主机上
+    所以脚本在容器里（docker compose exec ztplanet ztnet.py ...）和主机上
     （./scripts/ztnet.py ...）都用同一份，不需要额外参数。
     """
     if explicit:
         return explicit
+
     cands = []
     env = os.environ.get("ZTIO_DATA_DIR")
     if env:
         cands.append(os.path.join(env, "authtoken.secret"))
+
+    # .env 的 ZTIO_DATA_ROOT —— 与 docker-compose.yml 读的是同一个值
+    root = os.environ.get("ZTIO_DATA_ROOT")
+    if not root:
+        for envfile in (os.path.join(HERE, os.pardir, ".env"),
+                        os.path.join(HERE, os.pardir, os.pardir, ".env")):
+            try:
+                with open(envfile, encoding="utf-8") as fh:
+                    for line in fh:
+                        if line.startswith("ZTIO_DATA_ROOT="):
+                            root = line.split("=", 1)[1].strip()
+            except OSError:
+                continue
+            if root:
+                break
+    if root:
+        cands.append(os.path.join(root, "one", "authtoken.secret"))
+
     cands += [
-        "/var/lib/zerotier-one/authtoken.secret",
-        os.path.join(HERE, os.pardir, "data", "one", "authtoken.secret"),
-        os.path.join(HERE, os.pardir, os.pardir, "data", "one", "authtoken.secret"),
+        "/var/lib/zerotier-one/authtoken.secret",   # 容器内（ZT_HOME）
+        "/var/lib/ztio/one/authtoken.secret",       # 主机上的系统默认路径
     ]
+
     for c in cands:
         if os.path.isfile(c):
             return c
     raise SystemExit(
         "FATAL: 找不到 authtoken.secret。找过这些位置：\n    %s\n"
-        "  用 --token-file 显式指定。" % "\n    ".join(cands)
+        "  用 --token-file 显式指定，或设 ZTIO_DATA_ROOT。" % "\n    ".join(cands)
     )
-
-
 
 class API:
     def __init__(self, base, token):

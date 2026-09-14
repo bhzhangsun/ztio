@@ -24,6 +24,9 @@ app/**/GeneratedPluginRegistrant.*
 *.iml
 
 # ── server 构建与运行时产物 ───────────────────────────────────
+# 数据现在落在系统路径 /var/lib/ztio（由 .env 的 ZTIO_DATA_ROOT 决定），
+# 已不在仓库里。这条规则保留作纵深防御：万一有人改回相对路径，
+# 也不会把身份与签名密钥提交上去。
 server/data/
 server/.env
 server/*.tar.gz
