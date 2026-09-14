@@ -186,7 +186,7 @@
   "boundaries": [
     {
       "kind": "region",
-      "label": "阿里云 ECS · 8.137.163.130",
+      "label": "阿里云 ECS · 203.0.113.10",
       "wraps": [
         "firewall",
         "planet",

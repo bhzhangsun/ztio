@@ -1,39 +1,60 @@
 # ztio
 
-**在 ZeroTier 之上做应用层对等直连的通用方案。**
+> **用 ZeroTier 做信令通道，用直连做数据通道。**
 
-目标场景：两端（或多端）各自跑你自己的 App，你希望它们之间**尽可能走局域网直连**，
-局域网不通时**自动降级到 ZeroTier 传输**，全程**零手动配置、零公网服务依赖**。
-
----
-
-## 1. 一句话设计
-
-> **用 ZeroTier 做「信令通道」，用局域网做「数据通道」。**
-> ZeroTier 负责身份、加密、地址分配和「永远能通」的兜底路径；
-> ztio 负责在这条通道上交换各自的局域网候选地址，然后直连过去。
-
-ztio 本质上是 **一个跑在 ZeroTier 上的简化版 ICE**。
+两台各自运行自有 App 的设备，如何在受限网络里建立**尽可能直连**的连接。
 
 ---
 
-## 2. 核心结论（本文档的立足点）
+## ztio 是一套协议，不是 SDK
 
-| 结论 | 说明 |
-|---|---|
-| **IPv4 与 IPv6 是两个不同的问题** | IPv4 有**地址变换**（NAT），IPv6 **没有**。打洞要解决两件事，而 IPv6 只占一件 —— 见 `spec/01-overview.md` §1.2 |
-| **IPv4 真正的敌人是对称型 NAT** | 锥形 NAT（全锥/限制锥/端口限制锥）**都能打洞**；对称型**原理上不能**，而它是主流默认配置（含 CGNAT） |
-| **IPv6 仍需打洞，但那是防火墙打洞** | 两端状态防火墙默认阻断入站。靠**双方同时发起**即可 —— 不涉及地址变换，因此**确定、可预测** |
-| **rendezvous / mDNS 只解决「发现」，不解决「可达」** | 两者是独立的层。发现坏了不代表可达坏了 |
-| **屏蔽组播 ≠ 屏蔽单播** | AP 丢弃组播帧，但单播帧照常转发 —— 这是整套方案的物理基础 |
-| **ZeroTier 最差也能经 relay 通信** | 所以它天然是「永远可用」的信令通道，不需要任何公网 rendezvous |
-| **禁止用公网服务做发现** | 锚点放在 ZT 网络内即可，内网拓扑不外流，且无单点 |
-| **直连探测必须 ≤2s 且与 ZT 并行发起** | 否则用户感知为卡顿 |
-| **同档内按实测 RTT 排序，不按地址族** | IPv6 优先是**可达性**论据，不是**性能**论据 |
+这是本项目最重要的定位。
+
+**协议是一份**；**实现必然分叉** —— 因为不同平台的**授权、权限、网络 API** 根本不同。
+把「SDK」当成一个可移植的黑盒，是这类项目最常见的失败原因。
+
+因此本项目由**三个部分**构成：
+
+```
+ztio/
+├── docs/                ① 协议（唯一权威定义）
+│   ├── protocol.md        问题 / 分层 / 引导 / 候选 / 信令 / 状态机 / 安全 / 参数
+│   └── path-selection.md  探测（含双向同时发起）/ 选路 / 降级 / 自愈
+│
+├── server/              ② 控制面
+│   └── README.md          zerotier-one 1.14.1 + mkworld + ztiotool，以及许可结论
+│
+├── app/                 ③ 多端实现
+│   ├── README.md          Flutter：platform plugin + android/ios/macos
+│   └── platform.md        各平台的授权与实现差异 ← 分叉几乎全在这里
+│
+└── architecture/        架构图（可交互 HTML）
+```
+
+| 部分 | 是什么 | 技术 |
+|---|---|---|
+| **docs** | 协议规范。改这里 = 改协议 | Markdown |
+| **server** | 自建 Planet + Controller，含容器内 CLI `ztiotool` | Shell / Docker |
+| **app** | Flutter 工程：`ztio` plugin + 三端应用（macOS 为状态栏应用） | Dart + Swift / Kotlin |
 
 ---
 
-## 3. 路径优先级
+## 立足点：六条关于世界的事实
+
+（**我们做的选择**见下方「决策记录」——这里是选择所依据的事实。）
+
+| # | 事实 | 依据 |
+|---|---|---|
+| 1 | **IPv4 与 IPv6 是两个不同的问题** | IPv4 有地址变换，IPv6 没有。打洞要解决两件事，IPv6 只占一件 → [`protocol.md` §1.1](docs/protocol.md#11-连通性的现实ipv4-与-ipv6-是两个不同的问题) |
+| 2 | **IPv4 真正的敌人是对称型 NAT** | 锥形 NAT 都能打洞；对称型**原理上不能**，而它是主流默认配置（含 CGNAT） |
+| 3 | **IPv6 仍需打洞，但那是防火墙打洞** | 两端状态防火墙默认阻断入站。靠**双方同时发起**即可 —— 不涉及地址变换，**确定且可预测** |
+| 4 | **rendezvous / mDNS 只解决「发现」，不解决「可达」** | 两层独立。发现坏了不代表可达坏了 |
+| 5 | **屏蔽组播 ≠ 屏蔽单播** | AP 丢弃组播帧，单播帧照常转发 —— 整套方案的物理基础 |
+| 6 | **ZeroTier 最差也能经 relay 通信** | 它天然是「永远可用」的信令通道，不需要任何公网 rendezvous |
+
+---
+
+## 路径优先级
 
 ```
 ① 直连      IPv6 直连 / 局域网直连 / IPv4 直连       成本 0        ← 主路径
@@ -41,37 +62,11 @@ ztio 本质上是 **一个跑在 ZeroTier 上的简化版 ICE**。
 ③ ZT RELAY  经 planet 中继                            服务器流量费  ← 兜底
 ```
 
-**排序分两步**：先按**档**（决定成本），**档内按实测 RTT**（决定快慢）——
-IPv6 优先是可达性论据，不该用来推翻实测更快的那条路径。见 `spec/06-path-selection.md` §6.3。
-
-**允许上层按策略覆盖**（例如「强制走蜂窝出口」）。
+**排序分两步**：先按**档**（决定成本），**档内按实测 RTT**（决定快慢）。
 
 ---
 
-## 4. 目录结构
-
-```
-ztio/
-├── README.md                     本文件：总览与决策记录
-├── spec/
-│   ├── 01-overview.md            问题定义、目标、非目标、术语表
-│   ├── 02-architecture.md        分层架构、四个抽象、路径优先级
-│   ├── 03-bootstrap.md           引导：锚点模型与花名册协议
-│   ├── 04-candidates.md          候选枚举规则
-│   ├── 05-signaling.md           信令消息格式与连接状态机
-│   ├── 06-path-selection.md      探测、选路、降级、自愈
-│   ├── 07-parameters.md          超时 / 重试 / 阈值参数表
-│   ├── 08-platform-notes.md      平台差异与权限（iOS / Android / macOS）
-│   └── 09-security.md            安全与隐私
-├── architecture/
-│   ├── ztio-architecture.json    archify 架构图定义
-│   └── ztio-architecture.html    渲染产物
-└── reference/                    参考实现（待补）
-```
-
----
-
-## 5. 决策记录（ADR 摘要）
+## 决策记录
 
 | # | 决策 | 理由 | 被否决的方案 |
 |---|---|---|---|
@@ -86,74 +81,51 @@ ztio/
 | D9 | **IPv6 候选优先探测** | IPv6 无 NAT，只需穿有状态防火墙 —— **确定**；IPv4 对称型 NAT 是**原理上不可打洞**的 | 不区分地址族统一排序 |
 | D10 | **探测必须双向同时发起** | 两端状态防火墙默认阻断未请求的入站包，单向 `connect()` 在 IPv6 路径上必然失败 | 只由发起方 connect |
 | D11 | **同档内按 RTT 排序，不按地址族** | 都探测成功时可达性已被证明，此时实测 RTT 是唯一真实依据 | 固定 IPv6 > IPv4 |
+| D12 | **协议一份，实现三份** | 各平台的授权与网络 API 无法统一；强行统一只是把差异推迟到更贵的地方暴露 | 做一个可移植的 SDK |
 
 ---
 
-## 6. 与 ZeroTier 部署的关系
-
-ztio 是**应用层**方案，它依赖一套可用的 ZeroTier 控制面：
-
-- **Planet / Controller**：自建，提供根服务与网络定义
-- **锚点节点**：网络内地址固定的常开设备（通常是网段网关，如 `172.16.0.1`）
-
-部署细节见服务器上的 `/opt/zerotier/README-运维手册.md` 与
-`architecture/zerotier-deployment.json`。
-
----
-
-## 7. 术语
+## 术语
 
 | 术语 | 含义 |
 |---|---|
-| **候选（Candidate）** | 一台设备对外可被连接的一个地址（IP + 端口） |
-| **信令（Signaling）** | 两端交换候选集与状态的过程 |
-| **连通性检查** | 对一个候选发起的实际连接尝试 |
-| **锚点（Anchor）** | ZT 网络内地址固定、提供名字解析的节点 |
+| **候选（Candidate）** | 一台设备对外可被连接的一个地址（IP + 端口 + 类型） |
+| **信令（Signaling）** | 两端交换候选集与状态的过程；通道就是 ZT 链路 |
+| **锚点（Anchor）** | ZT 网内地址固定、提供名字解析的节点 |
+| **同时发起（Simultaneous Open）** | 两端各自向对方发起，用于穿过状态防火墙 |
 | **路径（Path）** | 一条被确认可用、正在承载数据的连接 |
 | **降级（Fallback）** | 主路径失败后切换到次优先路径的行为 |
-| **同时发起** | Simultaneous Open，两端各自向对方发起，用于穿过状态防火墙 |
 
 ---
 
-## 8. 仓库与提交
+## 从哪里开始读
 
-**权威仓库在部署服务器上**，本机只作镜像。
-
-```
-git@github.com:bhzhangsun/ztio.git
-```
-
-### 服务器如何获得推送权限
-
-服务器通过**仓库级 Deploy Key** 推送（不是账号级 SSH Key）：
-
-| 项 | 值 |
+| 你是 | 读 |
 |---|---|
-| 私钥 | `/root/.ssh/ztio_deploy`（`600`，**无 passphrase**） |
-| 公钥 | 已添加到该仓库的 Deploy Keys，**勾选 Allow write access** |
-| 指纹 | `SHA256:uJW7s3G8nW3jnbeBUaEoPSjNtcEJiXLGK+EFFwigil4` |
-| 客户端配置 | `/root/.ssh/config` 的 `Host github.com` 段 + `IdentitiesOnly yes` |
+| **想理解为什么这么设计** | [`docs/protocol.md` §1](docs/protocol.md#1-问题) —— 问题定义与连通性的现实 |
+| **要实现协议** | [`docs/protocol.md`](docs/protocol.md) → [`docs/path-selection.md`](docs/path-selection.md) |
+| **要搭控制面** | [`server/README.md`](server/README.md) |
+| **要写客户端** | [`app/README.md`](app/README.md) → [`app/platform.md`](app/platform.md) |
 
-**用仓库级而非账号级**，是为了把泄露的爆炸半径限制在这一个仓库。
+---
 
-### 验证
+## 仓库约定
 
-```bash
-ssh -T git@github.com            # 身份：Hi bhzhangsun/ztio!
-git push origin main --dry-run   # 写权限
-```
+> **本仓库是公开的。** 往这里加内容时请遵守：
 
-> `ssh -T` 只验证**身份**，不验**写权限** ——
-> Deploy Key 未勾选 `Allow write access` 时它照样成功，但 `push` 会 403。
-> 要确认写权限，用临时分支实测：
-> ```bash
-> git push origin main:refs/heads/__write_test
-> git push origin --delete __write_test
-> ```
+| 规则 | 说明 |
+|---|---|
+| **真实公网 IP 不入库** | 架构图里用文档保留地址 `203.0.113.10`（RFC 5737）代替 |
+| **密钥 / token / 身份文件不入库** | `identity.secret`、`authtoken.secret`、`SECRET_KEY`、私钥一律不进 git |
+| **部署实况不入库** | 真实地址、运维手册在部署主机上，不在这里 |
 
-### ⚠️ 不要在两处同时提交
+---
 
-本机镜像与服务器各有独立的 `.git`。**只在一处提交**，
-否则两侧历史会分叉，需要人工合并。
+## 许可
 
-**默认在服务器上提交**（它是权威副本，且现在可以直接推送）。
+| 部分 | 许可 |
+|---|---|
+| 本仓库的**协议文档与自有代码** | Apache 2.0 |
+| **ZeroTier Controller**（`server/` 部署涉及） | ⚠️ **Source-Available License 1.0** —— 对第三方提供服务（**含免费**）即属商业用途 |
+
+**边界与定义见 [`server/README.md` §5](server/README.md#5-许可)。**

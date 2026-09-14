@@ -11,9 +11,26 @@
 .idea/
 .vscode/
 
-# ── 参考实现构建产物（结构预留）────────────────────────────────
-reference/**/build/
-reference/**/dist/
-reference/**/node_modules/
-reference/**/target/
-reference/**/.venv/
+# ── app（Flutter）构建产物 ────────────────────────────────────
+app/build/
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/**/build/
+app/**/.dart_tool/
+app/**/Pods/
+app/**/.symlinks/
+app/**/GeneratedPluginRegistrant.*
+*.iml
+
+# ── server 构建与运行时产物 ───────────────────────────────────
+server/data/
+server/.env
+server/*.tar.gz
+
+# ── 任何时候都不入库 ─────────────────────────────────────────
+# 真实地址、密钥、身份文件 —— 本仓库是公开的
+identity.secret
+authtoken.secret
+*.key
+*.pem
