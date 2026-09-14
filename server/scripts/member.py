@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-成员管理 —— 网络配置是声明式的（apply-network.py），只有成员授权是运行时动作，
+成员管理 —— 成员授权是纯粹的运行时动作，所以它本来就该是命令式的。
+网络定义本身用 ztnet.py 管；两者的状态都在 controller 自己的存储里
+（controller.d/network/<nwid>.json 与 .../member/*.json），没有配置文件。
 所以单独留这一个命令。
 
 用法
@@ -25,7 +27,6 @@ import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CONFIG = os.path.join(HERE, os.pardir, "network.json")
 
 
 class API:
@@ -57,6 +58,10 @@ class API:
     def get_network(self, nwid):
         return self._req("GET", "/controller/network/" + nwid)
 
+    def list_networks(self):
+        r = self._req("GET", "/controller/network")
+        return r if isinstance(r, list) else []
+
     def members(self, nwid):
         return self._req("GET", "/controller/network/%s/member" % nwid)
 
@@ -75,21 +80,35 @@ class API:
         self._req("DELETE", "/controller/network/%s/member/%s" % (nwid, addr))
 
 
-def resolve_nwid(api, cfg_path):
-    cfg = json.load(open(os.path.abspath(cfg_path)))
-    nwid = (cfg.get("networkId") or "").strip()
+def resolve_nwid(api, nwid):
+    """nwid 来自命令行或自动探测 —— 不再从配置文件读。
+
+    controller 上没有配置文件这一说，状态就是它自己的存储
+    （controller.d/network/<nwid>.json）。所以这里也照着来：
+    显式给了就用，没给且只存在一个网络就选它，多个就要求显式指定。
+    """
+    nwid = (nwid or "").strip()
 
     if not nwid:
-        raise SystemExit(
-            "FATAL: %s 里的 networkId 是空的。\n"
-            "  先跑一次 scripts/apply-network.py 创建网络并取得 ID。" % cfg_path
-        )
+        nets = api.list_networks()
+        if len(nets) == 1:
+            nwid = nets[0]
+        elif not nets:
+            raise SystemExit(
+                "FATAL: controller 上还没有网络。\n"
+                "  先用 scripts/ztnet.py create 建一个。"
+            )
+        else:
+            raise SystemExit(
+                "FATAL: controller 上有 %d 个网络，必须用 --nwid 指定：\n    %s"
+                % (len(nets), "\n    ".join(nets))
+            )
 
     st = api.status()
     if not nwid.startswith(st["address"]):
         raise SystemExit(
-            "FATAL: networkId %s 的前 10 位不是本 controller 的地址 %s"
-            % (nwid, st["address"])
+            "FATAL: nwid %s 的前 10 位不是本 controller 的地址 %s\n"
+            "  网络无法在 controller 之间迁移 —— 只能重建。" % (nwid, st["address"])
         )
     return nwid
 
@@ -203,7 +222,7 @@ def cmd_ip(api, nwid, args):
 
 def main():
     ap = argparse.ArgumentParser(description="ztio 成员管理")
-    ap.add_argument("--config", default=DEFAULT_CONFIG, help="network.json 路径")
+    ap.add_argument("--nwid", help="网络 ID。省略时若 controller 上只有一个网络则自动选它")
     ap.add_argument("--api", default="http://127.0.0.1:9993")
     ap.add_argument(
         "--token-file",
@@ -233,7 +252,7 @@ def main():
     if not os.path.isfile(token_path):
         raise SystemExit("FATAL: 找不到 authtoken：%s" % token_path)
     api = API(args.api, open(token_path).read().strip())
-    nwid = resolve_nwid(api, args.config)
+    nwid = resolve_nwid(api, args.nwid)
 
     return {
         "list": cmd_list,

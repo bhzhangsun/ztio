@@ -171,7 +171,9 @@ echo " planet md5                    : $FINGERPRINT"
 echo " 分发副本                      : $SERVER_DIR/data/dist/planet"
 echo
 echo " 下一步：创建网络"
-echo "   ./scripts/apply-network.py"
+  echo "   ./scripts/ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200"
+  echo "   ./scripts/ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193"
+  echo "   ./scripts/ztnet.py ls"
 echo
 echo " 客户端接入：把 data/dist/planet 覆盖到设备的 ZeroTier 数据目录，"
 echo " 然后校验 md5 必须是 $FINGERPRINT"

@@ -84,13 +84,31 @@ planet 只在**首次**或**端点变化**时生成 —— 重启不会重新生
 
 ### 第 4 步：创建网络
 
-planet 只解决「节点怎么找到彼此」。网络定义（网段、DNS、路由、谁能加入）属于 controller，
-由 `network.json` 声明：
+planet 只解决「节点怎么找到彼此」。网络定义（网段、DNS、路由、谁能加入）属于 controller。
+
+**controller 没有配置文件** —— 它自己的存储就是状态：
+
+```
+data/one/controller.d/network/<16位nwid>.json            网络定义
+data/one/controller.d/network/<16位nwid>/member/*.json   成员授权
+```
+
+那是 ZeroTier 的原生布局（`EmbeddedNetworkController` + `FileDB`），`backup.sh` 备份的就是它。
+所以这里**不维护第二份配置** —— 两个数据源必然漂移，理由见
+[状态在 controller 自己那里](#状态在-controller-自己那里不在这里)。
 
 ```bash
-./scripts/apply-network.py           # 按 network.json 创建 / 收敛
-./scripts/apply-network.py --check   # 只比对不修改
+./scripts/ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200
+./scripts/ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193
+
+./scripts/ztnet.py ls          # 有哪些网络
+./scripts/ztnet.py show        # 某个网络的完整状态
+./scripts/ztnet.py fields      # 可写字段（从 API 自己推导）
+./scripts/ztnet.py set --mtu 2800
+./scripts/ztnet.py rm --yes
 ```
+
+不带 nwid 时，controller 上只有一个网络就自动选它；有多个则**要求显式指定，不替你猜**。
 
 **为什么要有这个脚本而不是直接 curl**：controller 的 API 只校验 JSON 语法，
 **不校验语义**，会静默改写。实测（1.14.2）：
@@ -105,7 +123,8 @@ planet 只解决「节点怎么找到彼此」。网络定义（网段、DNS、�
 | `v4AssignMode: {zt:true, dhcp:true}` | `{zt:true}`（dhcp 直接丢） |
 | `routes: 10.0.0.0/abc` | `10.0.0.0/0`（前缀吞成 0） |
 
-所以脚本先做语义预校验，写完再**逐字段读回比对**，不一致就报错。
+所以脚本**在发请求之前**校验（非法掩码、超范围、类型不符一律拦住，请求根本不发出去），
+写完再**逐字段读回比对**，不一致就报错。
 
 ### 第 5 步：让设备入网
 
@@ -160,12 +179,11 @@ server/
 ├── docker-compose.yml
 ├── .env.example
 ├── entrypoint.sh               生成 identity / planet / local.conf
-├── network.json                ★ 网络的声明式定义，进 git
 ├── patches/
 │   └── mkworld-env.py          把 mkworld 的硬编码 root 改成读环境变量
 └── scripts/
     ├── deploy.sh               构建 + 启动 + 验证 planet
-    ├── apply-network.py        收敛 network.json，写后回读比对
+    ├── ztnet.py                 网络的增删改查，请求前校验 + 写后回读比对
     ├── member.py               成员授权 / 固定地址
     └── backup.sh
 ```
@@ -272,10 +290,48 @@ prctl features), running as root
 
 ---
 
-## 网络配置是声明式的
+## 状态在 controller 自己那里，不在这里
 
-`network.json` 描述目标状态，`apply-network.py` 负责收敛。首次运行会创建网络并打印 ID，
-把它填回 `network.json` 的 `networkId` 并存进 git。
+**没有配置文件。** 这是刻意的 —— 早先有过一个 `network.json`，实测它已经和 controller 漂了：
+
+| 字段 | 文件里声明 | controller 实际 |
+|---|---|---|
+| `ipAssignmentPools` | `172.16.0.100–200` | `[]` |
+| `v4AssignMode` | `{zt: true}` | `{zt: false}` |
+| `v6AssignMode` | `{rfc4193: true}` | 全 `false` |
+| `dns` | `ztio.internal` / `[172.16.0.1]` | `testdns.lo` / `[]` |
+
+**两个数据源必然漂移，而且漂了没有任何东西会告诉你** —— 网络照常工作，
+只是行为和你以为的不一样。
+
+所以唯一的事实来源是 ZeroTier 自己的存储：
+
+```
+data/one/controller.d/network/<16位nwid>.json            网络定义（网段/DNS/路由/MTU）
+data/one/controller.d/network/<16位nwid>/member/*.json   每个成员一个文件
+```
+
+`backup.sh` 备份的就是它，有它就能完整恢复 —— 不需要再往 git 里放一份。
+
+**一个 controller 可以托管任意多个网络**，没有数量限制。多网络不需要任何额外机制：
+再 `create` 一个，就多一个 `<nwid>.json`。
+
+### 校验怎么做（不另写一份 schema）
+
+自己维护一份 schema 必然漏字段。实测 API 返回里有 `capabilities`、`tags`、`rules`、
+`ssoEnabled`、`authorizationEndpoint`、`rulesSource`、`remoteTraceTarget`、`clientId` ——
+手写的定义**一个都没覆盖**。所以：
+
+1. **可写字段集从 API 自己推导** —— 先 GET 一个网络，响应里的键就是字段全集，
+   减去只读的 `id`/`nwid`/`objtype`/`creationTime`/`revision`。
+   `./scripts/ztnet.py fields` 展示的就是这个
+2. **值的类型必须与现状一致** —— 挡的是 `mtu:"abc"`、`private:"yes"` 这类。
+   例外：**空容器不携带类型信息**（新建网络的 `dns` 是 `[]`，设置后才变对象），
+   这时只要求"是容器"
+3. **只对"说错话会变危险"的字段做前置检查** —— CIDR 掩码、`mtu`/`multicastLimit` 范围。
+   特别是 CIDR：非法掩码会被存成 `/0`，等于整个 IPv4 空间
+4. **回读比对作总兜底** —— 写进去的和读回来不一致就报错。这条覆盖所有意料之外的字段，
+   **且不需要预先知道 schema**
 
 ### 为什么必须「回读比对」
 
@@ -293,14 +349,10 @@ controller 的管理 API **只校验 JSON 语法，不校验语义**。不合法
 | `{"invalid`（语法错） | 500 `parse_error.101` ← 只有这种才报错 |
 
 对一个「把全网设备连起来」的东西来说，把 `10.0.0.0/abc` 悄悄变成 `0.0.0.0/0` 是灾难性的，
-而你不会收到任何提示。
+而你不会收到任何提示。所以上面第 3、4 条缺一不可。
 
-所以 `apply-network.py` 做两件事：写之前做完整语义预校验（不合法就不发请求），
-写之后回读并逐字段比对（被改写就报错，而不是假装成功）。
-
-```bash
-./scripts/apply-network.py --check    # 只比对现状与目标，不改动
-```
+> `create` 是先建网络再写配置（API 要求如此）。所以**初始配置校验失败时会自动回滚删掉**
+> 刚建的网络 —— 不会在 controller 上留下用着默认值的孤儿网络。
 
 ---
 
@@ -452,7 +504,7 @@ $EDITOR docker-compose.yml     # 3) 同步 ZT_VERSION 与 image 标签
 ./scripts/deploy.sh            # 4) 构建 + 启动 + 验证 planet
 ```
 
-升级后 `zerotier-cli` / 管理 API 的字段可能有变化，`apply-network.py` 的回读比对会发现。
+升级后 `zerotier-cli` / 管理 API 的字段可能有变化，`ztnet.py` 的回读比对会发现。
 
 `data/` 里的东西（identity、planet 签名密钥、controller 定义的网络）不受影响，
 `docker compose down && up -d` 也不会动它们 —— 所以降级同样安全。

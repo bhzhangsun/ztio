@@ -30,8 +30,8 @@ ztio/
 │   └── exit-proxy.md          ★ 出口代理设计 —— 唯一的核心文档
 ├── server/                    自建 planet + controller
 │   ├── Dockerfile             固定 ZeroTier 1.14.2，用预编译包（不编译源码）
-│   ├── network.json           网络的声明式定义
-│   ├── scripts/               deploy / apply-network / member / backup
+│   ├── scripts/               deploy / ztnet（网络增删改查）/ member / backup
+│   ├── data/                  controller 状态与 planet（不进 git，backup.sh 覆盖）
 │   └── README.md
 ├── app/                       Flutter 客户端
 │   ├── README.md              代理引擎的分层与两个角色
