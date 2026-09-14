@@ -88,7 +88,7 @@ LABEL org.opencontainers.image.title="ztio planet+controller" \
 # libstdc++6 / libssl3 由 debian:12-slim 基础层提供。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl iproute2 jq tini adduser openssl \
+      ca-certificates curl iproute2 jq tini adduser openssl python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # 校验后用 dpkg -i 正常安装。
@@ -119,6 +119,19 @@ RUN chmod 0755 /usr/local/bin/mkworld \
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+# 管理脚本装进镜像。网络是**在容器内手动创建**的：
+#     docker compose exec planet ztnet.py create --name homenet ...
+# 所以脚本必须能在容器里跑 —— 依赖上面的 python3（运行镜像本来没有，
+# 只有构建 mkworld 的那个阶段有）。
+#
+# 主机上如果有 checkout，同一份脚本也能直接跑：./scripts/ztnet.py
+COPY scripts/ /opt/ztio/
+RUN chmod 0755 /opt/ztio/*.py /opt/ztio/*.sh \
+ && ln -sf /opt/ztio/ztnet.py  /usr/local/bin/ztnet.py \
+ && ln -sf /opt/ztio/member.py /usr/local/bin/member.py \
+ && test -x /usr/local/bin/ztnet.py \
+ && /usr/local/bin/ztnet.py --help > /dev/null
 
 # ZeroTier 的数据目录。identity、planet 签名密钥、controller 的 network 定义
 # 全在这里 —— 必须持久化，容器重建不能丢。

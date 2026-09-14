@@ -170,10 +170,17 @@ echo " 端点                          : $ZTIO_PUBLIC_IP4/$ZT_PORT"
 echo " planet md5                    : $FINGERPRINT"
 echo " 分发副本                      : $SERVER_DIR/data/dist/planet"
 echo
-echo " 下一步：创建网络"
-  echo "   ./scripts/ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200"
-  echo "   ./scripts/ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193"
-  echo "   ./scripts/ztnet.py ls"
+  echo " 部署到此结束 —— planet 与 controller 已就绪。"
+  echo " **不会自动创建任何网络** —— 第一个网络由你手动创建。"
+  echo
+  echo " 管理脚本已装进镜像，在容器内跑（外面不需要 python）："
+  echo "   docker compose exec ztplanet ztnet.py ls"
+  echo "   docker compose exec ztplanet ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200"
+  echo "   docker compose exec ztplanet ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193"
+  echo
+  echo " 成员授权也在容器内："
+  echo "   docker compose exec ztplanet member.py pending"
+  echo "   docker compose exec ztplanet member.py authorize <设备地址>"
 echo
 echo " 客户端接入：把 data/dist/planet 覆盖到设备的 ZeroTier 数据目录，"
 echo " 然后校验 md5 必须是 $FINGERPRINT"

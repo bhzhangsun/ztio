@@ -65,6 +65,35 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TOKEN = os.path.join(HERE, os.pardir, "data", "one", "authtoken.secret")
 
+def find_token(explicit=None):
+    """authtoken.secret 的位置随运行环境不同 —— 两个都要能认出来。
+
+        容器内   /var/lib/zerotier-one/authtoken.secret   （ZT_HOME 默认值）
+        主机上   <checkout>/server/data/one/authtoken.secret
+
+    所以脚本在容器里（docker compose exec planet ztnet.py ...）和主机上
+    （./scripts/ztnet.py ...）都用同一份，不需要额外参数。
+    """
+    if explicit:
+        return explicit
+    cands = []
+    env = os.environ.get("ZTIO_DATA_DIR")
+    if env:
+        cands.append(os.path.join(env, "authtoken.secret"))
+    cands += [
+        "/var/lib/zerotier-one/authtoken.secret",
+        os.path.join(HERE, os.pardir, "data", "one", "authtoken.secret"),
+        os.path.join(HERE, os.pardir, os.pardir, "data", "one", "authtoken.secret"),
+    ]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    raise SystemExit(
+        "FATAL: 找不到 authtoken.secret。找过这些位置：\n    %s\n"
+        "  用 --token-file 显式指定。" % "\n    ".join(cands)
+    )
+
+
 # controller 自己产生、不接受写入的字段
 READONLY = {"id", "nwid", "objtype", "creationTime", "revision"}
 
@@ -452,9 +481,9 @@ def cmd_create(zt, args):
             zt.delete(nwid)
             print("✅ 已回滚，controller 上不留痕迹。修正参数后重试。")
         except SystemExit:
-            print("⚠️ 回滚失败 —— 请手动执行：./ztnet.py rm %s --yes" % nwid)
+            print("⚠️ 回滚失败 —— 请手动执行：ztnet.py rm %s --yes" % nwid)
     else:
-        print("\n记住这个 ID —— 它不会再被打印第二次。查看：./ztnet.py ls")
+        print("\n记住这个 ID —— 它不会再被打印第二次。查看：ztnet.py ls")
     return rc
 
 
@@ -492,7 +521,9 @@ def main():
         epilog=__doc__.split("用法\n----\n")[-1],
     )
     ap.add_argument("--api", default="http://127.0.0.1:9993", help="controller 管理 API")
-    ap.add_argument("--token-file", default=DEFAULT_TOKEN, help="authtoken.secret 路径")
+    ap.add_argument("--token-file", default=None,
+                    help="authtoken.secret 路径（默认自动找：容器内 /var/lib/zerotier-one/，"
+                         "主机上 server/data/one/）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("ls", help="列出所有网络").set_defaults(fn=cmd_ls)
@@ -548,9 +579,7 @@ def main():
 
     args = ap.parse_args()
 
-    token_path = os.path.abspath(args.token_file)
-    if not os.path.isfile(token_path):
-        raise SystemExit("FATAL: 找不到 authtoken：%s" % token_path)
+    token_path = find_token(args.token_file)
     zt = Controller(args.api, open(token_path).read().strip())
 
     try:

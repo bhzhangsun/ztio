@@ -28,6 +28,35 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+def find_token(explicit=None):
+    """authtoken.secret 的位置随运行环境不同 —— 两个都要能认出来。
+
+        容器内   /var/lib/zerotier-one/authtoken.secret   （ZT_HOME 默认值）
+        主机上   <checkout>/server/data/one/authtoken.secret
+
+    所以脚本在容器里（docker compose exec planet ztnet.py ...）和主机上
+    （./scripts/ztnet.py ...）都用同一份，不需要额外参数。
+    """
+    if explicit:
+        return explicit
+    cands = []
+    env = os.environ.get("ZTIO_DATA_DIR")
+    if env:
+        cands.append(os.path.join(env, "authtoken.secret"))
+    cands += [
+        "/var/lib/zerotier-one/authtoken.secret",
+        os.path.join(HERE, os.pardir, "data", "one", "authtoken.secret"),
+        os.path.join(HERE, os.pardir, os.pardir, "data", "one", "authtoken.secret"),
+    ]
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    raise SystemExit(
+        "FATAL: 找不到 authtoken.secret。找过这些位置：\n    %s\n"
+        "  用 --token-file 显式指定。" % "\n    ".join(cands)
+    )
+
+
 
 class API:
     def __init__(self, base, token):
@@ -226,7 +255,7 @@ def main():
     ap.add_argument("--api", default="http://127.0.0.1:9993")
     ap.add_argument(
         "--token-file",
-        default=os.path.join(HERE, os.pardir, "data", "one", "authtoken.secret"),
+        default=None,
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -248,9 +277,7 @@ def main():
 
     args = ap.parse_args()
 
-    token_path = os.path.abspath(args.token_file)
-    if not os.path.isfile(token_path):
-        raise SystemExit("FATAL: 找不到 authtoken：%s" % token_path)
+    token_path = find_token(args.token_file)
     api = API(args.api, open(token_path).read().strip())
     nwid = resolve_nwid(api, args.nwid)
 

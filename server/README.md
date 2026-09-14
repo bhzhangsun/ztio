@@ -44,7 +44,7 @@ $EDITOR .env                    # 填 ZTIO_PUBLIC_IP4=你的公网 IP
 **就这些。** 第 3 步会自己构建镜像、起容器、等管理 API 就绪，然后**把生成的 planet
 解出来逐项核对**（类型、世界 ID、root 公钥、端点 IP 与端口）—— 核对不过直接报错退出。
 
-之后还有两件事（创建网络、让设备入网），见下面第 4、5 步。
+**部署到此结束 —— 不会创建任何网络。** 需要网络时见下面「创建网络」，成员授权见「让设备入网」。
 
 ### 关于那个公网 IP
 
@@ -82,9 +82,34 @@ $EDITOR .env                    # 填 ZTIO_PUBLIC_IP4=你的公网 IP
 planet 只在**首次**或**端点变化**时生成 —— 重启不会重新生成（幂等，已实测）。
 只有换公网 IP 时才需要 `ZTIO_FORCE_PLANET_REGEN=1`。
 
-### 第 4 步：创建网络
+### 创建网络（手动，按需）
 
-planet 只解决「节点怎么找到彼此」。网络定义（网段、DNS、路由、谁能加入）属于 controller。
+**部署不会创建任何网络。** planet 只解决「节点怎么找到彼此」；网络定义（网段、DNS、
+路由、谁能加入）属于 controller，由你在需要时手动创建。
+
+管理脚本装进了镜像，所以**在容器内跑** —— 服务器上不需要装 python：
+
+```bash
+docker compose exec ztplanet ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200
+docker compose exec ztplanet ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193
+```
+
+`create` 会打印出 nwid（形如 `b021fa09d579af0f`）—— **记下来**，授权成员要用。
+
+其它子命令：
+
+```bash
+docker compose exec ztplanet ztnet.py ls       # 有哪些网络
+docker compose exec ztplanet ztnet.py show     # 某个网络的完整状态
+docker compose exec ztplanet ztnet.py fields   # 可写字段（从 API 自己推导）
+docker compose exec ztplanet ztnet.py set --mtu 2800
+docker compose exec ztplanet ztnet.py rm --yes
+```
+
+不带 nwid 时，controller 上只有一个网络就自动选它；有多个则**要求显式指定，不替你猜**。
+
+> 主机上如果有 git checkout，同一份脚本也能直接跑（`./scripts/ztnet.py ...`）——
+> 它自己找得到 token（容器内 `/var/lib/zerotier-one/`，主机上 `server/data/one/`）。
 
 **controller 没有配置文件** —— 它自己的存储就是状态：
 
@@ -96,19 +121,6 @@ data/one/controller.d/network/<16位nwid>/member/*.json   成员授权
 那是 ZeroTier 的原生布局（`EmbeddedNetworkController` + `FileDB`），`backup.sh` 备份的就是它。
 所以这里**不维护第二份配置** —— 两个数据源必然漂移，理由见
 [状态在 controller 自己那里](#状态在-controller-自己那里不在这里)。
-
-```bash
-./scripts/ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200
-./scripts/ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193
-
-./scripts/ztnet.py ls          # 有哪些网络
-./scripts/ztnet.py show        # 某个网络的完整状态
-./scripts/ztnet.py fields      # 可写字段（从 API 自己推导）
-./scripts/ztnet.py set --mtu 2800
-./scripts/ztnet.py rm --yes
-```
-
-不带 nwid 时，controller 上只有一个网络就自动选它；有多个则**要求显式指定，不替你猜**。
 
 **为什么要有这个脚本而不是直接 curl**：controller 的 API 只校验 JSON 语法，
 **不校验语义**，会静默改写。实测（1.14.2）：
@@ -126,25 +138,27 @@ data/one/controller.d/network/<16位nwid>/member/*.json   成员授权
 所以脚本**在发请求之前**校验（非法掩码、超范围、类型不符一律拦住，请求根本不发出去），
 写完再**逐字段读回比对**，不一致就报错。
 
-### 第 5 步：让设备入网
+### 让设备入网
+
+网络是 `private=true`，设备 join 之后处于**未授权**状态，什么都做不了。用 `member.py`
+授权 —— 同样在容器内：
 
 ```bash
-./scripts/member.py pending               # 看谁在敲门（拿到地址但没授权）
-./scripts/member.py authorize <地址>...   # 授权
-./scripts/member.py list                  # 全部成员与状态
-./scripts/member.py ip <地址> 172.16.0.10 # 固定地址
-./scripts/member.py deauthorize <地址>    # 撤销
+docker compose exec ztplanet member.py pending              # 看谁在敲门
+docker compose exec ztplanet member.py authorize <地址>      # 授权
+docker compose exec ztplanet member.py list                 # 全部成员与状态
 ```
 
-### 第 6 步：把 planet 发给客户端
+详见 [成员管理](#成员管理)。
+
+### 把 planet 发给客户端
 
 ```bash
 scp root@<服务器>:/path/to/server/data/dist/planet  ./planet
 ```
 
-覆盖到每台设备的 ZeroTier 数据目录并重启服务 —— 各平台的确切路径、校验方法，
-以及**为什么官方 planet 的存在不会让自建 planet 失效**，见下面的
-[客户端接入](#客户端接入)一节。
+各平台的确切路径、校验方法，以及**为什么官方 planet 的存在不会让自建 planet 失效**，
+见 [客户端接入](#客户端接入)。
 
 > planet 内容对所有人可见（它就是个公开的根列表），**但 `data/one/identity.secret`
 > 和 `current.c25519` 是密钥，绝对不能外传** —— `identity.secret` 泄露等于别人可以
@@ -153,11 +167,12 @@ scp root@<服务器>:/path/to/server/data/dist/planet  ./planet
 ### 日常操作
 
 ```bash
+```bash
 docker compose logs -f                        # 看日志
 docker compose restart                        # 重启（不会重新生成 planet）
 docker compose down && docker compose up -d   # 重建容器，数据在 data/ 里不受影响
 ./scripts/backup.sh                           # 备份密钥与控制器状态
-./scripts/member.py list                      # 成员状态
+docker compose exec ztplanet member.py list   # 成员状态
 ```
 
 `backup.sh` 会把 `identity.secret`、`authtoken.secret`、`current.c25519`、
@@ -183,10 +198,18 @@ server/
 │   └── mkworld-env.py          把 mkworld 的硬编码 root 改成读环境变量
 └── scripts/
     ├── deploy.sh               构建 + 启动 + 验证 planet
-    ├── ztnet.py                 网络的增删改查，请求前校验 + 写后回读比对
+    ├── ztnet.py                网络的增删改查，请求前校验 + 写后回读比对
     ├── member.py               成员授权 / 固定地址
-    └── backup.sh
+    └── backup.sh               备份密钥与 controller 状态
 ```
+
+`scripts/` 会被 `COPY` 进镜像（`/opt/ztio/`，并在 `/usr/local/bin` 建软链），
+所以**同一份脚本在容器内和主机上都能跑** —— 它自己会找 token：
+
+| 在哪跑 | 怎么调 | 数据目录 |
+|---|---|---|
+| 容器内（推荐） | `docker compose exec ztplanet ztnet.py ...` | `/var/lib/zerotier-one/` |
+| 主机上（有 checkout 时） | `./scripts/ztnet.py ...` | `server/data/one/` |
 
 ---
 
@@ -361,12 +384,12 @@ controller 的管理 API **只校验 JSON 语法，不校验语义**。不合法
 网络是 `private=true`，设备 join 之后处于**未授权**状态，什么都做不了。
 
 ```bash
-./scripts/member.py pending              # 看哪些设备在敲门
-./scripts/member.py authorize <地址>      # 授权（可一次多个）
-./scripts/member.py list                 # 全部成员 + 授权状态 + 分配地址
-./scripts/member.py ip <地址> 172.16.0.50 # 指定固定地址
-./scripts/member.py ip <地址> --clear     # 回到自动分配
-./scripts/member.py deauthorize <地址>    # 取消授权（保留记录）
+docker compose exec ztplanet member.py pending               # 看哪些设备在敲门
+docker compose exec ztplanet member.py authorize <地址>       # 授权（可一次多个）
+docker compose exec ztplanet member.py list                  # 全部成员 + 授权状态 + 分配地址
+docker compose exec ztplanet member.py ip <地址> 172.16.0.50  # 指定固定地址
+docker compose exec ztplanet member.py ip <地址> --clear      # 回到自动分配
+docker compose exec ztplanet member.py deauthorize <地址>     # 取消授权（保留记录）
 ```
 
 地址是 10 位十六进制的 ZeroTier 地址，设备上跑 `zerotier-cli info` 就能看到。
