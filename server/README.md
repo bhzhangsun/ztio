@@ -11,18 +11,144 @@
 
 ---
 
-## 快速开始
+## 部署
+
+### 前置条件
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| **公网 IP** | 必须有 | root 的地址要写进 planet，所有节点靠它互相找到。**这是唯一需要你提供的信息** |
+| Docker | 20.10+ | 需要 `docker compose` 插件（`docker compose version` 能跑） |
+| 入站端口 | **UDP 9993** | 唯一需要开放的端口。TCP 9993 是本地管理 API，**不要**对外 |
+| 内存 | 512 MB 够 | 实测在 1.6 GB / 2 vCPU 的机器上构建 + 运行无压力 |
+| 磁盘 | 1 GB 够 | 镜像 112 MB + 数据几百 KB |
+
+**不需要** `/dev/net/tun`、`NET_ADMIN`、`SYS_ADMIN`、`--privileged`。
+这台机器**不加入任何网络** —— 它只是根服务器和控制器，不承载业务流量。
+
+### 三步部署
 
 ```bash
-cp .env.example .env
-$EDITOR .env                 # 至少填 ZTIO_PUBLIC_IP4
+# 1. 取代码
+git clone https://github.com/bhzhangsun/ztio.git
+cd ztio/server
 
-./scripts/deploy.sh          # 构建 + 启动 + 验证 planet
-./scripts/apply-network.py   # 按 network.json 创建网络
-./scripts/member.py pending  # 看谁在敲门
+# 2. 配置 —— 只有一个必填项
+cp .env.example .env
+$EDITOR .env                    # 填 ZTIO_PUBLIC_IP4=你的公网 IP
+
+# 3. 一条命令：构建 + 启动 + 验证
+./scripts/deploy.sh
 ```
 
-客户端接入时，把 `data/dist/planet` 覆盖到设备的 ZeroTier 数据目录即可。
+**就这些。** 第 3 步会自己构建镜像、起容器、等管理 API 就绪，然后**把生成的 planet
+解出来逐项核对**（类型、世界 ID、root 公钥、端点 IP 与端口）—— 核对不过直接报错退出。
+
+之后还有两件事（创建网络、让设备入网），见下面第 4、5 步。
+
+### 关于那个公网 IP
+
+这是唯一必须手填的东西，因为**服务器不可能知道自己对外的公网 IP**（云主机的网卡上
+只有内网地址，公网 IP 是 NAT 映射出来的）。
+
+- 阿里云 ECS 上填**弹性公网 IP**
+- **不要**填 `172.19.x.x` 这类内网地址
+- `deploy.sh` 会主动拒绝 `203.0.113.10`（示例值）和 RFC1918 私网地址
+
+填错的后果值得强调：**容器正常、API 正常、`zerotier-cli` 正常、`/status` 返回 200**，
+但设备之间**永远连不通** —— 因为它们拿着一个错误的地址去找 root。这类故障从日志上
+看不出来，所以 `deploy.sh` 才要解包核对而不是只看容器起没起。
+
+### `deploy.sh` 背后做了什么
+
+```bash
+./scripts/deploy.sh              # 完整流程
+./scripts/deploy.sh --no-build   # 跳过构建（只改了 .env 或单纯重启时用）
+```
+
+1. 前置检查：docker、compose 插件、`.env` 存在且 IP 合法、9993 端口没被占
+2. `docker compose build` → `up -d`
+3. 轮询等待管理 API 可应答
+4. 解析容器里的 planet 二进制，逐项断言（见上）
+
+**首次启动时容器内部会自动**（`entrypoint.sh`）：
+
+1. 生成节点 identity
+2. 用 `mkworld` 按当前 identity + 你的公网 IP 生成 planet，同时放到 `data/dist/planet`
+3. 写 `local.conf`：`allowSecondaryPort:false`、`portMappingEnabled:false`、
+   `allowManagementFrom:["127.0.0.1","::1"]` —— 把管理 API 锁在容器内
+4. 启动 `zerotier-one`
+
+planet 只在**首次**或**端点变化**时生成 —— 重启不会重新生成（幂等，已实测）。
+只有换公网 IP 时才需要 `ZTIO_FORCE_PLANET_REGEN=1`。
+
+### 第 4 步：创建网络
+
+planet 只解决「节点怎么找到彼此」。网络定义（网段、DNS、路由、谁能加入）属于 controller，
+由 `network.json` 声明：
+
+```bash
+./scripts/apply-network.py           # 按 network.json 创建 / 收敛
+./scripts/apply-network.py --check   # 只比对不修改
+```
+
+**为什么要有这个脚本而不是直接 curl**：controller 的 API 只校验 JSON 语法，
+**不校验语义**，会静默改写。实测（1.14.2）：
+
+| 你写的 | 它存下的 |
+|---|---|
+| `mtu: "abc"` | `1280`（悄悄换成默认值） |
+| `mtu: 999999` | `10000`（悄悄截断到上限） |
+| `mtu: {...}`（类型都错） | **HTTP 200，静默忽略** |
+| `private: "yes"` | `false` |
+| `multicastLimit: -5` | `18446744073709552000` |
+| `v4AssignMode: {zt:true, dhcp:true}` | `{zt:true}`（dhcp 直接丢） |
+| `routes: 10.0.0.0/abc` | `10.0.0.0/0`（前缀吞成 0） |
+
+所以脚本先做语义预校验，写完再**逐字段读回比对**，不一致就报错。
+
+### 第 5 步：让设备入网
+
+```bash
+./scripts/member.py pending               # 看谁在敲门（拿到地址但没授权）
+./scripts/member.py authorize <地址>...   # 授权
+./scripts/member.py list                  # 全部成员与状态
+./scripts/member.py ip <地址> 172.16.0.10 # 固定地址
+./scripts/member.py deauthorize <地址>    # 撤销
+```
+
+### 第 6 步：把 planet 发给客户端
+
+```bash
+scp root@<服务器>:/path/to/server/data/dist/planet  ./planet
+```
+
+覆盖到每台设备的 ZeroTier 数据目录并重启服务 —— 各平台的确切路径、校验方法，
+以及**为什么官方 planet 的存在不会让自建 planet 失效**，见下面的
+[客户端接入](#客户端接入)一节。
+
+> planet 内容对所有人可见（它就是个公开的根列表），**但 `data/one/identity.secret`
+> 和 `current.c25519` 是密钥，绝对不能外传** —— `identity.secret` 泄露等于别人可以
+> 冒充你的 root。
+
+### 日常操作
+
+```bash
+docker compose logs -f                        # 看日志
+docker compose restart                        # 重启（不会重新生成 planet）
+docker compose down && docker compose up -d   # 重建容器，数据在 data/ 里不受影响
+./scripts/backup.sh                           # 备份密钥与控制器状态
+./scripts/member.py list                      # 成员状态
+```
+
+`backup.sh` 会把 `identity.secret`、`authtoken.secret`、`current.c25519`、
+`previous.c25519`、`planet`、`local.conf`、`controller.d/` 打包，校验归档可解，
+并按 `KEEP=14` 轮转。**这些是丢了就无法恢复的东西** —— 尤其是 `current.c25519`，
+它是 planet 的签名密钥；丢了之后所有已入网设备都要重新分发 planet。
+
+### 升级到新版本
+
+见下面的 [升级](#升级) 一节。
 
 ---
 
@@ -101,17 +227,44 @@ leaf 认出的 `4570a54054` 正是 root 的 identity，路径 `10.99.0.2/9993` �
 **1. 换 `ZT_VERSION` 时必须同时换 `ZT_DEB_SHA256`。** 这是刻意的：宁可构建失败，
 也不要在不知情的情况下装上一个未校验的二进制。
 
-**2. `dpkg -i` 会在容器里建一个 `zerotier-one` 系统用户**，于是 ZeroTier 启动时会尝试
-降权到它，在容器里失败并打这条警告：
+**2. 启动时会看到一条「降权失败」警告 —— 这是预期行为，不是故障。**
 
 ```
 zerotier-one: WARNING: failed to drop privileges (kernel may not support required
 prctl features), running as root
 ```
 
-**无害**，它继续以 root 运行，功能不受影响。之所以记下来，是因为它容易让人误以为
-出了问题。要真正消除它得让容器整体以该用户运行，那需要额外处理数据卷属主 ——
-留作后续加固项，当前不阻塞。
+**这句文案是误导性的。** 它说「kernel may not support required prctl features」，
+但真实原因和内核无关。完整机制（读了 `one.cpp` 源码 + 实测确认）：
+
+1. ZeroTier 在 Linux 上想把权限从 root 降到一个无特权用户 `zerotier-one`，
+   **同时保留 `CAP_NET_ADMIN` 和 `CAP_NET_RAW`** —— 因为它要创建和配置 TUN 虚拟网卡
+2. 为此它调用 `capset()`（`_setCapabilities()`）去设置含 **`CAP_NET_ADMIN`（bit 12）**
+   在内的能力位
+3. **Docker 默认能力集（`CapBnd = 0xa80425fb`）不含 bit 12** —— 这是刻意的安全默认值
+4. `capset()` 因 `EPERM` 失败 → ZeroTier 放弃降权 → 打这条警告 → 继续以 root 运行
+
+**验证**：加 `--cap-add NET_ADMIN` 后警告立刻消失，数据目录也被 chown 给
+`zerotier-one`（证明降权真的执行了）。而 `--security-opt seccomp=unconfined`
+**消不掉**它 —— 这是**能力**限制，不是 seccomp 限制。
+
+**所以这条警告恰恰是我们安全选择的直接结果**：我们故意不给 `CAP_NET_ADMIN`，
+因为**这台机器不加入任何网络、永远不创建 TUN 设备**，根本不需要它。
+为了消掉一行警告去授予 `CAP_NET_ADMIN` 是得不偿失的。
+
+**对系统的影响：没有。** 容器进程是 root，但那是**容器内的 root**，不是你主机上的 root ——
+没有 `--privileged`、没有 `CAP_NET_ADMIN`/`CAP_SYS_ADMIN`、没有 `/dev/net/tun`、
+用默认 seccomp 和自己的 namespace，且只有 `./data/one` 与 `./data/dist`
+两个目录被挂进来。
+
+唯一实际代价：少了一层纵深防御 —— 万一 ZeroTier 被攻破，攻击者拿到的是**容器内的 root**
+而非 `zerotier-one` 用户，因此能以 root 读写那两个挂载目录（其中 `identity.secret`
+在主机上本来就是 root 所有）。
+
+**想彻底消除它**（可选的加固，当前未做）：让容器整体以 `zerotier-one` 用户运行。
+源码里 `dropPrivileges()` 第一行就是 `if (getuid() != 0) return;` —— 已经非 root 就直接
+跳过，不会有警告，且**不需要任何 capability**。代价是要额外处理数据卷属主
+（启动时 chown，或预先在主机上改好属主）。
 
 **3. 不要用 `dpkg-deb -x <deb> /`。** 实测会把镜像的 `/usr/bin` 清空 —— 解包后
 `ls`、`grep`、`dpkg-deb` 全部 "not found"，而那个 deb 里根本没有 `usr/bin/`。
@@ -177,6 +330,7 @@ controller 的管理 API **只校验 JSON 语法，不校验语义**。不合法
 | Linux | `/var/lib/zerotier-one/planet` |
 | macOS | `/Library/Application Support/ZeroTier/One/planet` |
 | Windows | `C:\ProgramData\ZeroTier\One\planet` |
+| iOS / Android | 官方 app 没有可写的数据目录 —— 用内嵌 libzt 的 app，planet 随包分发 |
 
 替换后重启 ZeroTier 服务。**务必用 md5 校验**（`deploy.sh` 会打印正确的值）：
 
@@ -287,14 +441,21 @@ ZeroTier 的 VL1 依据**源地址**判断对端路径，而 root 的职责恰�
 
 ## 升级
 
-planet 的签名密钥和 identity 都在数据卷里，所以换镜像不影响已入网的设备。
+planet 的签名密钥和 identity 都在数据卷里，所以**换镜像不影响已入网的设备**。
 
 ```bash
-$EDITOR Dockerfile            # 改 ARG ZT_VERSION
-./scripts/deploy.sh
+./scripts/backup.sh            # 先备份
+$EDITOR Dockerfile             # 1) 改 ARG ZT_VERSION
+                               # 2) 同时改 ZT_DEB_SHA256 —— 不改的话构建会失败，
+                               #    这是刻意的：宁可失败，也不装未校验的二进制
+$EDITOR docker-compose.yml     # 3) 同步 ZT_VERSION 与 image 标签
+./scripts/deploy.sh            # 4) 构建 + 启动 + 验证 planet
 ```
 
 升级后 `zerotier-cli` / 管理 API 的字段可能有变化，`apply-network.py` 的回读比对会发现。
+
+`data/` 里的东西（identity、planet 签名密钥、controller 定义的网络）不受影响，
+`docker compose down && up -d` 也不会动它们 —— 所以降级同样安全。
 
 > 注意：1.14.2 是**最后一个** controller 仍在 `controller/`、受 BSL 覆盖的版本。
 > 1.16.0 起 controller 移入 `nonfree/`，改为仅限非商业 —— 所以不追新。
