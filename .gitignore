@@ -28,6 +28,13 @@ server/data/
 server/.env
 server/*.tar.gz
 
+# ── 备份归档 ──────────────────────────────────────────────────
+# backup.sh 默认写到 <仓库>/backups/。归档里含 identity.secret 与 planet
+# 签名私钥，拿到即可冒充 root，**绝不能入库**。文件名规则（identity.secret
+# 等）匹配不到 tar.gz，必须单独挡。
+backups/
+*.tar.gz
+
 # ── 任何时候都不入库 ─────────────────────────────────────────
 # 真实地址、密钥、身份文件 —— 本仓库是公开的
 identity.secret

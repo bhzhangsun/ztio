@@ -75,6 +75,22 @@ libzt: bind/listen/accept  ──→  宿主机栈: Socket.connect  ──→  �
 
 移动端只做第一种（iOS/Android 无法设置系统级代理）。
 
+### 用哪个 planet
+
+**官方客户端没有「自定义 planet」功能** —— 移动端官方 app 的数据目录在沙箱里，无处可放。
+所以 app **必须自带** planet，否则用户连不上我们自己的网络：
+
+```
+planet/planet                     ← 仓库根目录，随 app 打包
+```
+
+完整说明、文件格式、以及「什么情况下换 planet 会被静默拒绝」见
+[`../planet/README.md`](../planet/README.md)。两条要点：
+
+1. **`zts_init_set_roots()` 必须在 `zts_node_start()` 之前调用** —— 顺序错了会静默退回官方根
+2. **要同时关掉根缓存**（`zts_init_allow_roots_cache(0)`），否则已装用户缓存着旧 planet，
+   你推的新 planet 会因为验签不过被**默默拒掉**，而用户以为更新成功了
+
 ---
 
 ## 3. 分层：什么共享，什么分叉
@@ -165,6 +181,7 @@ onNetworkChanged()         → stream
 | V3 | Android 13+ `NEARBY_WIFI_DEVICES` 对局域网单播的实际限制 | 中 | 实测被拒后单播是否仍可用 |
 | **V4** | libzt 与 zerotier-one **1.14.2** 的 `vProto` 兼容性 | **高** | 检查成员对象的 `vProto` 字段 |
 | V5 | 移动端 libzt 是否支持 `local.conf` 的 `bind` | 中 | 实测 |
+| **V6** | `zts_init_set_roots` 的 `roots_data` 是 planet 二进制还是 `zts_root_set_t` | 中 | 读 libzt 源码（头文件只写 "binary"，实现没找到）；或最小工程实测 |
 
 > **V1、V2、V4 是一票否决级的。** 建议在写任何 UI 之前先验证这三项 ——
 > 它们决定整个工程结构，越晚发现代价越大。

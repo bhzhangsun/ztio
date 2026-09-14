@@ -36,6 +36,9 @@ ztio/
 ├── app/                       Flutter 客户端
 │   ├── README.md              代理引擎的分层与两个角色
 │   └── platform.md            各平台权限与实现差异 ← 分叉几乎全在这里
+├── planet/                    ★ 本部署的世界定义，随 app 打包
+│   ├── planet                 257 字节 World 文件（只有公钥，无任何私钥）
+│   └── README.md              格式逐字节解析 / 换 planet 的规则 / app 接入方式
 └── architecture/              架构图（可交互 HTML）
 ```
 
