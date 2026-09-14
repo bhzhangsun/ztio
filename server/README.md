@@ -1,204 +1,263 @@
-# server — 控制面
+# server —— 自建 ZeroTier planet + controller
 
-自建的 ZeroTier **Planet + Controller**，为 ztio 提供 L0（身份 / 加密 / 地址 / 兜底可达性）。
+这台机器做两件事：
 
-```
-zerotier-one 1.14.1  ─┬─ Planet    根服务：信令、打洞协助、中继
-                      ├─ Controller 网络定义与成员授权
-                      └─ 控制面 API 127.0.0.1:9993
-        mkworld      ──── 生成 planet / moon 文件
-        ztiotool     ──── 容器内 CLI，供 agent 操作控制面
-```
-
-**对外只暴露一个端口：`UDP 9993`**（ZT 线协议）。
-管理 API（TCP 9993）只绑回环，**不对公网开放**。
-
----
-
-## 1. 为什么锁定 1.14.1
-
-| 原因 | 说明 |
+| 角色 | 作用 |
 |---|---|
-| **许可** | 1.14.1 的 BSL 1.1 Change Date 为 `2026-01-01`，**已到期转为 Apache 2.0**。更早版本未必 |
-| **协议稳定** | 与主流客户端版本一致，`vProto` 兼容 |
-| **可复现** | 镜像与二进制都可固定 digest / sha256 |
+| **planet（root）** | ZeroTier 的根服务器。所有节点靠它互相找到对方、协助打洞、必要时中继 |
+| **controller** | 网络定义、成员授权、地址分配。你的网络不再依赖 ZeroTier Central |
 
-**风险**：1.14.1 不再收到安全更新。这是**有意接受的取舍** ——
-控制面不暴露到公网（见 §4），攻击面主要是 ZT 线协议本身。
-
-**升级时的检查清单**：
-
-1. 新版本的 BSL Change Date 是否已过？（未过则不是 Apache 2.0）
-2. Controller 部分是否仍受 **ZeroTier Source-Available License** 约束？
-3. `vProto` 是否仍与现网客户端兼容？
-4. `identity.secret` / `planet` / `controller.d/` 迁移是否完整？
+它**自己不加入任何网络** —— 所以不需要虚拟网卡、不需要 `NET_ADMIN`、不需要 `/dev/net/tun`。
 
 ---
 
-## 2. mkworld
-
-从 ZT 身份生成自定义根服务文件。
+## 快速开始
 
 ```bash
-/var/lib/zerotier-one/mkworld > /var/lib/zerotier-one/planet
+cp .env.example .env
+$EDITOR .env                 # 至少填 ZTIO_PUBLIC_IP4
+
+./scripts/deploy.sh          # 构建 + 启动 + 验证 planet
+./scripts/apply-network.py   # 按 network.json 创建网络
+./scripts/member.py pending  # 看谁在敲门
 ```
 
-生成的 `planet` 内含你的根节点地址，**必须分发给所有客户端**（替换内置 planet）。
-
-> **`mkworld` 会改写 `previous.c25519` / `current.c25519`。**
-> 容器里这两个文件在可写层，重跑会在镜像层留下垃圾 —— 生成后应清理。
-
-**分发**：客户端用自建 planet 替换 `/var/lib/zerotier-one/planet`。
-这是「气隙根」成立的唯一条件 —— 已验证：网络外的节点只会看到
-`<controller地址> PLANET -1 RELAY`，不会回落到官方根。
+客户端接入时，把 `data/dist/planet` 覆盖到设备的 ZeroTier 数据目录即可。
 
 ---
 
-## 3. ztiotool
+## 目录
 
-**容器内的控制面 CLI。** 它不是给终端用户用的，而是**给 agent 用的** ——
-agent 通过 `docker exec` 调用它来配置网络，无需手工拼 JSON 或碰控制面 API。
+```
+server/
+├── Dockerfile                  固定 1.14.1，装预编译包 + 只编译 mkworld
+├── docker-compose.yml
+├── .env.example
+├── entrypoint.sh               生成 identity / planet / local.conf
+├── network.json                ★ 网络的声明式定义，进 git
+├── patches/
+│   └── mkworld-env.py          把 mkworld 的硬编码 root 改成读环境变量
+└── scripts/
+    ├── deploy.sh               构建 + 启动 + 验证 planet
+    ├── apply-network.py        收敛 network.json，写后回读比对
+    ├── member.py               成员授权 / 固定地址
+    └── backup.sh
+```
 
-### 为什么需要它
+---
 
-ZeroTier 的 Controller API 有个危险的特性：**只校验 JSON 语法，不做语义校验**。
-写错的值会被**静默接受并改写**，从返回结果里看不出来。
+## 镜像从哪里取 ZeroTier
 
-| 你写入 | 实际存下 | 后果 |
+**不从源码构建。** 一开始是源码构建的，但那个选择是错的：在 2 vCPU / 1.6 GB 的机器上，
+`make -j2` 编译 ZeroTier 的 `node/*.cpp` 内存峰值很高，**实测把整台机器压进 swap 抖动到
+SSH 都无法完成握手**，只能靠控制台重启。而它换来的只是「不依赖第三方包」。
+
+实测过的各条来源：
+
+| 来源 | 从目标服务器可达 | 结论 |
 |---|---|---|
-| `"mtu": "abc"` | `1280` | 静默取默认值 |
-| `"private": "yes"` | `false` | **网络变公开** |
-| `"mtu": 999999` | `10000` | 超出上限被截断 |
-| `"multicastLimit": -5` | `18446744073709551611` | 无符号回绕 |
-| `"rules": [非法]` | `[]` | **规则被清空** |
-| `"10.0.0.0/abc"` | `10.0.0.0/0` | **变成一个覆盖全网的巨型路由** |
+| `download.zerotier.com`（官方 apt 源 / 安装脚本） | ❌ 超时 | 不可用 |
+| GitHub Releases 的 `.deb` | ❌ 1.14.1 那个 release **没有任何附件** | 不存在 |
+| **`mirrors.sustech.edu.cn/zerotier/`** | ✅ HTTP 200 / 1.05s | **zerotier-one 的 .deb** |
+| `codeload.github.com` 源码 tarball | ✅ HTTP 200 / 0.98s | **只用来编译 mkworld** |
 
-**`ztiotool` 的职责就是在写入前做语义校验、写入后回读比对**，
-把「静默改写」变成「明确报错」。
+```dockerfile
+# zerotier-one：3.2 MB 的预编译包，实测 1.2 秒下载完，sha256 已与官方核对
+ARG ZT_DEB_URL=https://mirrors.sustech.edu.cn/zerotier/RELEASES/${ZT_VERSION}/dist/debian/bookworm/zerotier-one_${ZT_VERSION}_amd64.deb
+ARG ZT_DEB_SHA256=6f6f8c0ed785b5f05b8d831b4f208f23c6ea8e91220f9f7d4417123873bb0317
 
-### 命令
+# mkworld：发行包里没有它（attic 工具），只能编译 —— 但它只依赖 8 个小文件，几秒钟
+ARG ZT_SRC_URL=https://codeload.github.com/zerotier/ZeroTierOne/tar.gz/refs/tags/${ZT_VERSION}
+```
+
+两个来源都做成 build-arg，**换环境只需改这两行**（比如把镜像换成官方源或自建缓存）。
+
+### 两个必须知道的坑
+
+**1. 换 `ZT_VERSION` 时必须同时换 `ZT_DEB_SHA256`。** 这是刻意的：宁可构建失败，
+也不要在不知情的情况下装上一个未校验的二进制。
+
+**2. 不要用 `dpkg-deb -x <deb> /`。** 实测会把镜像的 `/usr/bin` 清空 ——
+解包后 `ls`、`grep`、`dpkg-deb` 全部 "not found"，而那个 deb 里根本没有 `usr/bin/`。
+Dockerfile 里改成解到暂存目录再 `cp -a` 挑需要的 `usr/sbin`。
+
+---
+
+## 网络配置是声明式的
+
+`network.json` 描述目标状态，`apply-network.py` 负责收敛。首次运行会创建网络并打印 ID，
+把它填回 `network.json` 的 `networkId` 并存进 git。
+
+### 为什么必须「回读比对」
+
+controller 的管理 API **只校验 JSON 语法，不校验语义**。不合法的值会被**静默改写**而不是报错。
+实测（1.14.1）：
+
+| 写入 | 回读 |
+|---|---|
+| `{"mtu": "abc"}` | `1280` |
+| `{"mtu": 999999}` | `10000` |
+| `{"private": "yes"}` | `false` |
+| `{"multicastLimit": -5}` | `18446744073709551611` |
+| `{"target": "10.0.0.0/abc"}` | `10.0.0.0/0` ← **整个 IPv4 空间** |
+| `"rules": [坏结构]` | `[]` |
+| `{"invalid`（语法错） | 500 `parse_error.101` ← 只有这种才报错 |
+
+对一个「把全网设备连起来」的东西来说，把 `10.0.0.0/abc` 悄悄变成 `0.0.0.0/0` 是灾难性的，
+而你不会收到任何提示。
+
+所以 `apply-network.py` 做两件事：写之前做完整语义预校验（不合法就不发请求），
+写之后回读并逐字段比对（被改写就报错，而不是假装成功）。
 
 ```bash
-ztiotool create  <name>                       创建网络，返回 nwid
-ztiotool show    <nwid>                       显示网络定义（可读格式）
-ztiotool member  add|list|rm <nwid> [...]     成员管理与授权
-ztiotool gateway set|unset <nwid> <ip>        设置网段网关
-ztiotool dns     sync <nwid>                  同步 DNS 配置
-ztiotool doctor                               自检
+./scripts/apply-network.py --check    # 只比对现状与目标，不改动
 ```
-
-`doctor` 检查项：
-
-| 检查 | 说明 |
-|---|---|
-| 控制面可达 | `GET /status` 返回 200 |
-| 身份完整 | `identity.public` / `identity.secret` 都存在且匹配 |
-| **灾难守卫** | `.deployed` 存在但 `identity.secret` 缺失 → **立即报错** |
-| planet 已生成 | `/var/lib/zerotier-one/planet` 存在且非空 |
-| 网络定义可解析 | `controller.d/network/*.json` 全部合法 |
-| **回读比对** | 本地定义与 API 返回一致 |
-| 监听状态 | 线协议端口在监听 |
-
-### 关键约束
-
-| 约束 | 后果 |
-|---|---|
-| **只连 `127.0.0.1:9993`** | 不暴露任何端口；不产生新的攻击面 |
-| **写入前校验** | 拒绝非法值，而不是依赖服务端 |
-| **写入后回读比对** | 检出静默改写 |
-| **幂等** | 重复执行同样的命令结果相同 |
-| **不删网络** | 删除走显式确认；`DELETE` 的键是 `id` 而非 `nwid` |
-
-### 语义陷阱（已实测确认）
-
-| 陷阱 | 事实 |
-|---|---|
-| **成员对象没有路由 / 下一跳字段** | POST `routes` / `nextHop` 会被**静默丢弃**。完整字段表只有 `activeBridge, address, authenticationExpiryTime, authorized, capabilities, creationTime, id, ipAssignments, lastAuthorizedCredential, lastAuthorizedCredentialType, lastAuthorizedTime, lastDeauthorizedTime, noAutoAssignIps, nwid, objtype, remoteTraceLevel, remoteTraceTarget, revision, ssoExempt, tags, vMajor, vMinor, vProto, vRev` |
-| **路由是网络级的** | `routes[].via` 全网络生效，**不能按成员设** |
-| **`via: null` 表示本地 LAN 路由** | 不是「无下一跳」 |
-| **托管地址必须落在已分配的路由内** | 官方约束，否则客户端不会应用 |
-| **`allowManaged` / `allowGlobal` / `allowDefault` / `allowDNS` 是客户端设置** | 控制面**无法**下发，只能由客户端 `zerotier-cli set` 自己设 |
-
-> **最后一条最容易被误解成「控制面配置」。** 它不是。
-> 想让某台设备成为出口网关，必须在**那台设备上**设置 `allowDefault=1` ——
-> 控制面只能提供路由信息。
-
-### 网络 ID 的构成
-
-```
-Network ID = <controller 的 10 位十六进制 ZT 地址> + <6 位十六进制序号>
-```
-
-**网络无法在 controller 之间迁移** —— 这是硬约束，多租户设计时必须考虑。
 
 ---
 
-## 4. 部署形态
+## 成员管理
 
-```
-公网
- │  只开 UDP 9993
- ▼
-┌─ 云主机 ────────────────────────────────┐
-│  ┌─ 容器（network_mode: host）────────┐  │
-│  │  zerotier-one 1.14.1               │  │
-│  │    ├ 线协议      UDP 9993  ← 唯一对外│  │
-│  │    ├ 管理 API    TCP 9993  127.0.0.1│  │
-│  │    └ 数据卷      identity/planet/…  │  │
-│  │  ztiotool  ← docker exec 调用        │  │
-│  └────────────────────────────────────┘  │
-└──────────────────────────────────────────┘
+网络是 `private=true`，设备 join 之后处于**未授权**状态，什么都做不了。
+
+```bash
+./scripts/member.py pending              # 看哪些设备在敲门
+./scripts/member.py authorize <地址>      # 授权（可一次多个）
+./scripts/member.py list                 # 全部成员 + 授权状态 + 分配地址
+./scripts/member.py ip <地址> 172.16.0.50 # 指定固定地址
+./scripts/member.py ip <地址> --clear     # 回到自动分配
+./scripts/member.py deauthorize <地址>    # 取消授权（保留记录）
 ```
 
-| 项 | 要求 |
-|---|---|
-| `network_mode` | `host` —— 否则 UDP 9993 的打洞协助需要额外端口映射 |
-| 能力 | `NET_ADMIN`, `SYS_ADMIN`；挂载 `/dev/net/tun` |
-| 管理 API | **必须只绑回环**（`local.conf` 的 `allowManagementFrom`） |
-| Web 面板 | 需要时**走 SSH 隧道**，不要对公网开端口 |
-
-### ⚠️ 成本约束
-
-Planet 会**中继**流量。云主机的出网流量按 GB 计费，长期中继会持续烧钱。
-
-| 规则 | 说明 |
-|---|---|
-| **绝不长期停留在 RELAY** | 定期 `zerotier-cli peers` 检查 |
-| **出口网关不能是本机** | 它只能是信令与中继的兜底，不能承载数据出口 |
-| 中继是「兜底」不是「常态」 | 客户端应尽快建立直连 |
+地址是 10 位十六进制的 ZeroTier 地址，设备上跑 `zerotier-cli info` 就能看到。
 
 ---
 
-## 5. 许可
+## 客户端接入
 
-**本目录的部署方式涉及三层不同的许可**，必须分清：
+把 planet 分发到每台设备：
 
-| 组件 | 许可 | 商用 |
+| 平台 | 数据目录 |
+|---|---|
+| Linux | `/var/lib/zerotier-one/planet` |
+| macOS | `/Library/Application Support/ZeroTier/One/planet` |
+| Windows | `C:\ProgramData\ZeroTier\One\planet` |
+
+替换后重启 ZeroTier 服务。**务必用 md5 校验**（`deploy.sh` 会打印正确的值）：
+
+```bash
+md5sum /var/lib/zerotier-one/planet       # 必须与 deploy.sh 输出的值一致
+```
+
+一个容易忽略的点：**官方 planet 是编译在二进制里的**（`node/Topology.cpp` 的 `ZT_DEFAULT_WORLD`）。
+磁盘上的 planet 和它同 ID（都是 149604618），靠时间戳和签名区分。所以：
+
+- 自建 planet 的时间戳必须**比设备已缓存的那个新**
+- 且必须能用**设备已缓存 planet 的签名密钥**验证通过
+
+两条都满足才会被接受。这也是下面那条铁律的来源。
+
+---
+
+## 三条硬性约束
+
+### 1. planet 的签名密钥绝对不能变
+
+`current.c25519` / `previous.c25519`（在 `data/one/` 下）是 planet 的签名密钥。
+节点替换 planet 的判据（`node/World.hpp:149`）：
+
+```cpp
+if ((_id == update._id) && (_ts < update._ts) && (_type == update._type)) {
+    return C25519::verify(_updatesMustBeSignedBy, ..., update._signature);
+}
+```
+
+注意 `_updatesMustBeSignedBy` 取自**节点当前缓存的 planet**。所以一旦换了签名密钥，
+新 planet 无法通过旧 planet 的验签 —— **已经缓存旧 planet 的节点永远不会接受新的**，
+只能逐台手工删掉 planet 文件。
+
+同理，`identity.secret` 也不能丢：planet 里 root 的公钥就是它，换了所有设备都连不回来。
+
+`entrypoint.sh` 里有一个灾难守卫：数据目录曾被初始化过（存在 `.ztio-initialized`）
+但 `identity.secret` 不见了，会**拒绝启动**而不是"顺手"生成一套新的。
+
+### 2. 只能在 `via` 全网统一的前提下下发路由
+
+网络配置里的 `routes[].via` 对**所有成员**生效，而 **member 对象没有任何路由字段**。
+向成员 POST `routes` / `nextHop` 会被静默丢弃（已核对 1.14.1 的成员字段全集）。
+
+需要「每个节点走不同的出口」时，只能用 [应用层代理](../docs/exit-proxy.md)，不能用 IP 路由。
+
+### 3. 不要依赖自动探测公网 IP
+
+目标服务器上 `icanhazip` 之类的服务不可达（实测超时）。`ZTIO_PUBLIC_IP4` 必须显式填，
+`deploy.sh` 也会拒绝内网地址和文档示例地址。
+
+---
+
+## 备份
+
+```bash
+./scripts/backup.sh              # 默认写到 ../backups/，保留 14 份
+```
+
+归档里有两样性质完全不同的东西：
+
+- `identity.secret` + `current/previous.c25519` —— **整套系统的根**。丢了所有设备永久失联，
+  且无法用备份以外的方式恢复
+- `controller.d/` —— 网络定义与成员授权。丢了要重建，但设备还在网里，重新授权即可
+
+脚本会验证归档确实包含关键文件且能解开，而不是"看起来成功了"才收工。
+
+> ⚠️ 归档含 planet 签名私钥 —— 拿到它的人可以冒充你的 root 并签发世界更新。
+> 存到受控位置，不要进公开仓库。`backup.sh` 会把权限设为 600。
+
+---
+
+## 安全
+
+### 端口
+
+| 端口 | 用途 | 是否对公网开放 |
 |---|---|---|
-| `zerotier-one` 1.14.1 | BSL 1.1，Change Date `2026-01-01` **已过** → **Apache 2.0** | ✅ 可以 |
-| **Controller**（`service/`） | **ZeroTier Source-Available License 1.0** | ⚠️ **受限，见下** |
-| `libzt`（SDK） | 同上，Change Date 已过 → Apache 2.0 | ✅ 可以 |
-| `ztncui`（第三方面板） | GPLv3 | 视分发方式 |
+| UDP 9993 | ZeroTier 线协议 | ✅ **唯一需要放行的** |
+| TCP 9993 | 管理 API | ❌ 绑在 `0.0.0.0`（host 网络所致），由应用层 `allowManagementFrom` 限制为仅本机 |
 
-### Controller 许可的实际约束
+安全组只需要一条入站规则：**UDP 9993**。
 
-**Source-Available License 1.0 的要点**：
+因为用了 `network_mode: host`，TCP 9993 会绑到 `0.0.0.0`。ZeroTier 在应用层拒绝非本机请求
+（`service/OneService.cpp:1742` 按源地址过滤），但如果主机的 `iptables -P INPUT` 是 `ACCEPT`
+且安全组放行了 9993/tcp，这层就只剩应用一层防护。建议在安全组或主机防火墙上额外关掉它。
 
-| 项 | 内容 |
-|---|---|
-| 非商业用途 | 个人 / 教育 / 评估（评估期 ≤ 30 天） |
-| **商业用途的定义** | **包括非营利组织、慈善机构，以及付费或*免费*的对第三方服务** |
-| 专利授权 | ❌ **不授予** |
-| 管辖 | 加州法律 |
+**不要**放行 3443 / 3000 —— 本编排不提供任何 HTTP 服务。
 
-> **⚠️ 关键：即使你的服务完全免费，只要是对第三方的服务，也算商业用途。**
->
-> 「我自己和家人的设备用」= 非商业 ✅
-> 「给朋友的设备用，不收费」 = **商业** ⚠️
-> 「公司内部用」 = **商业** ⚠️
->
-> 这是 ZeroTier 官方的定义，不是解释。**对外提供服务前必须确认许可**，
-> 或向 ZeroTier 取得商业授权。
+### 容器权限
 
-**本项目的定位**：ztio 自身是协议与实现（Apache 2.0 兼容），
-但**自建 Controller 的部署方式**受上述许可约束 —— 二者要分开看。
+刻意**没有**下面这些。第三方镜像 `xubiaolin/zerotier-planet` 要求它们，但 planet + controller
+不需要：
+
+```yaml
+# devices: ["/dev/net/tun:/dev/net/tun"]
+# cap_add: [NET_ADMIN, SYS_ADMIN]
+```
+
+去掉之后，即使容器被攻破也无法建虚拟网卡、改路由、挂载。
+
+### 为什么用 host 网络
+
+ZeroTier 的 VL1 依据**源地址**判断对端路径，而 root 的职责恰恰是协助两端打洞 ——
+走 Docker 的 bridge + DNAT 会让它看到的地址与真实路径不一致，地址错了就打不成。
+
+---
+
+## 升级
+
+planet 的签名密钥和 identity 都在数据卷里，所以换镜像不影响已入网的设备。
+
+```bash
+$EDITOR Dockerfile            # 改 ARG ZT_VERSION
+./scripts/deploy.sh
+```
+
+升级后 `zerotier-cli` / 管理 API 的字段可能有变化，`apply-network.py` 的回读比对会发现。
+
+> 注意：1.14.1 之前的版本不在 Apache 2.0 的 Change Date 覆盖范围内，授权不同。

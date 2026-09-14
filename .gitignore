@@ -34,3 +34,7 @@ identity.secret
 authtoken.secret
 *.key
 *.pem
+
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.pyc

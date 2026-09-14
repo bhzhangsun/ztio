@@ -1,0 +1,71 @@
+# ztio —— 自建 ZeroTier planet + controller
+#
+# 用法：
+#   cp .env.example .env      # 填 ZTIO_PUBLIC_IP4
+#   docker compose up -d --build
+#
+# 安全组只需要放行一条入站规则：UDP 9993。
+# 不要放行 TCP 3443 / 3000 / 9993 —— 本编排不提供任何 HTTP 服务。
+
+services:
+  ztplanet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ZT_VERSION: "1.14.1"
+
+    image: ztio/planet:1.14.1
+    container_name: ztplanet
+    restart: unless-stopped
+
+    # ------------------------------------------------------------
+    # 为什么用 host 网络
+    # ------------------------------------------------------------
+    # ZeroTier 的 VL1 依据「源地址」判断对端路径。走 Docker 的 bridge + DNAT
+    # 会让这台 root 看到的地址与真实路径不一致，而 root 的职责恰恰是协助
+    # 两端打洞 —— 地址错了就打不成。
+    #
+    # host 网络的附带好处：管理 API 直接落在 127.0.0.1:9993，控制面脚本
+    # 用普通 curl 即可，不需要 docker exec。
+    # 附带代价：管理 API 绑在 0.0.0.0（ZeroTier 在应用层拦截，见 local.conf
+    # 的 allowManagementFrom），所以**必须**同时在主机防火墙/安全组上关掉 TCP 9993。
+    network_mode: host
+
+    environment:
+      # 必填。阿里云 ECS 填弹性公网 IP。
+      # 不要依赖镜像自动探测：目标服务器上 icanhazip 之类服务不可达（实测超时）。
+      ZTIO_PUBLIC_IP4: "${ZTIO_PUBLIC_IP4:?必须设置 ZTIO_PUBLIC_IP4（本机公网 IPv4）}"
+
+      # 选填。没有 IPv6 就留空，planet 里只写 IPv4 端点。
+      ZTIO_PUBLIC_IP6: "${ZTIO_PUBLIC_IP6:-}"
+
+      ZTIO_ZT_PORT: "9993"
+
+      # 置 1 可强制重新生成 planet（会更新世界时间戳，客户端会重新握手一次）。
+      ZTIO_FORCE_PLANET_REGEN: "${ZTIO_FORCE_PLANET_REGEN:-0}"
+
+    volumes:
+      # 必须持久化。这里面是节点身份、planet 签名密钥、网络定义与成员授权。
+      # 丢了 identity 或 c25519 密钥，全网设备都会失联且无法自动恢复。
+      - ./data/one:/var/lib/zerotier-one
+      # 对外分发的 planet。
+      - ./data/dist:/dist
+
+    # ------------------------------------------------------------
+    # 刻意不写的东西
+    # ------------------------------------------------------------
+    # devices: /dev/net/tun      —— planet + controller 不加入任何网络，不需要虚拟网卡
+    # cap_add: NET_ADMIN         —— 同上，不需要改网络
+    # cap_add: SYS_ADMIN         —— 同上
+    #
+    # 这三项是第三方镜像 xubiaolin/zerotier-planet 要求的。去掉之后容器权限
+    # 大幅收窄：即使容器被攻破，也无法建虚拟网卡、无法改路由、无法挂载。
+
+    mem_limit: 900m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
