@@ -462,7 +462,7 @@ if ((_id == update._id) && (_ts < update._ts) && (_type == update._type)) {
 ## 备份
 
 ```bash
-./scripts/backup.sh              # 默认写到 ../backups/，保留 14 份
+./scripts/backup.sh              # 默认写到 /var/backups/ztio/，保留 14 份
 ```
 
 归档里有两样性质完全不同的东西：
@@ -475,6 +475,20 @@ if ((_id == update._id) && (_ts < update._ts) && (_type == update._type)) {
 
 > ⚠️ 归档含 planet 签名私钥 —— 拿到它的人可以冒充你的 root 并签发世界更新。
 > 存到受控位置，不要进公开仓库。`backup.sh` 会把权限设为 600。
+
+**⚠️ 写在 `/var/backups/ztio/` 只是「不在仓库里」，不是「安全」。** 它和 `data/one/`
+在同一台机器上 —— 机器没了两份一起没。**必须定期把归档拷到本机或其他地方**：
+
+```bash
+# 从自己的电脑上拉回来
+scp root@8.137.163.130:/var/backups/ztio/ztio-*.tar.gz ./
+shasum -a 256 ztio-*.tar.gz     # 与服务器上的 sha256sum 比对
+```
+
+> 归档小（<2 KB 起），丢了 `identity.secret` 和 `current.c25519` 才是真的没救 ——
+> 那意味着所有已安装的 app 永久失联，只能发新版强制用户更新，而**新版也救不回来**
+> （老用户的 libzt 缓存着旧密钥签的 planet，新 planet 验签不过会被静默丢弃）。
+> 详见 [`../planet/README.md`](../planet/README.md)。
 
 ---
 

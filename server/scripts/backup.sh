@@ -17,7 +17,7 @@
 #      重新授权即可恢复。
 #
 # 用法:
-#   ./backup.sh              备份到 ../backups/
+#   ./backup.sh              备份到 /var/backups/ztio/
 #   ./backup.sh /path/to/dir 备份到指定目录
 # ============================================================
 set -euo pipefail
@@ -26,7 +26,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$(cd "$HERE/.." && pwd)"
 DATA_DIR="${SERVER_DIR}/data/one"
 DIST_DIR="${SERVER_DIR}/data/dist"
-BACKUP_DIR="${1:-${SERVER_DIR}/../backups}"
+BACKUP_DIR="${1:-/var/backups/ztio}"
 KEEP="${ZTIO_BACKUP_KEEP:-14}"
 
 [ -d "$DATA_DIR" ] || { echo "FATAL: 数据目录不存在：$DATA_DIR" >&2; exit 1; }

@@ -104,8 +104,11 @@ server/data/one/current.c25519       世界更新签名密钥
 server/data/one/previous.c25519      上一代，轮换时用
 ```
 
-`server/scripts/backup.sh` 会把它们连同 `controller.d` 一起打包。
-**归档含私钥，绝不能进本仓库**（`.gitignore` 已挡 `backups/` 与 `*.tar.gz`）。
+`server/scripts/backup.sh` 会把它们连同 `controller.d` 一起打包，**默认写到 `/var/backups/ztio/`**
+（仓库**外面** —— 备份不该和它保护的东西放在一起，否则 `git clean -xfd` 会连它一起删掉）。
+
+**归档含私钥，绝不能进本仓库。** `.gitignore` 里除了按文件名挡（`identity.secret` 等），
+还额外挡了 `backups/` 与 `*.tar.gz` —— 因为文件名规则**匹配不到归档**，这是个真实踩过的坑。
 
 ---
 
