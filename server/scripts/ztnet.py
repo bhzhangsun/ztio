@@ -340,6 +340,37 @@ def build_payload(args):
     return p
 
 
+def _route_covers(routes, ip_str):
+    """ip_str 是否落在 routes 的某条 target 里。"""
+    try:
+        ip = ipaddress.ip_address(str(ip_str))
+    except ValueError:
+        return False
+    for r in (routes or []):
+        t = r.get("target") if isinstance(r, dict) else None
+        if not t:
+            continue
+        try:
+            if ip in ipaddress.ip_network(str(t), strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _pool_route_hint(pool):
+    """给出能覆盖这个 pool 的建议路由；推不出单个 /24 时返回 None。"""
+    try:
+        s = ipaddress.ip_address(str(pool.get("ipRangeStart")))
+        e = ipaddress.ip_address(str(pool.get("ipRangeEnd")))
+    except (ValueError, TypeError):
+        return None
+    if s.version != 4 or e.version != 4:
+        return None
+    net = ipaddress.ip_network("%s/24" % s, strict=False)
+    return str(net) if e in net else None
+
+
 def validate(payload, baseline):
     """请求之前的检查：字段在不在、类型对不对。"""
     allowed = set(writable_fields(baseline))
@@ -351,6 +382,38 @@ def validate(payload, baseline):
             )
         if k in baseline:
             check_type(k, v, baseline)
+
+    # ---- 分配池必须落在某条 route 里 ----
+    # controller 源码（controller/EmbeddedNetworkController.cpp）里：
+    #
+    #   int routedNetmaskBits = -1;
+    #   for (rk...) if (routes[rk].target.containsAddress(ip)) routedNetmaskBits = ...;
+    #   if (routedNetmaskBits >= 0) { nc->staticIps[...] = ip; }   // 把地址放进配置
+    #
+    # 自动分配那段是 routedNetmaskBits > 0 才分配。
+    # 也就是说：**没有覆盖 pool 的路由，controller 一个地址都不会下发**，
+    # 但网段/DNS/MTU 照常下发 —— 客户端 status=OK、netconfRevision 正常，
+    # 只有 assignedAddresses 永远是空的。这个失败模式完全不报错，只能靠这条路拦。
+    routes = payload.get("routes", baseline.get("routes"))
+    pools = payload.get("ipAssignmentPools", baseline.get("ipAssignmentPools")) or []
+    for pool in pools:
+        if not isinstance(pool, dict):
+            continue
+        s0, e0 = pool.get("ipRangeStart"), pool.get("ipRangeEnd")
+        if not s0 or not e0:
+            continue
+        if not _route_covers(routes, s0):
+            hint = _pool_route_hint(pool)
+            raise Invalid(
+                "分配池 %s-%s 没有落在任何 route 里。\n"
+                "    controller 只会下发给「落在某条 route 覆盖范围内」的地址 ——\n"
+                "    这种情况下网段/DNS/MTU 照常下发，客户端 status=OK，\n"
+                "    但 assignedAddresses 永远是空的，且服务端不报任何错。\n"
+                "    %s"
+                % (s0, e0,
+                   ("建议加上：--route %s" % hint) if hint
+                   else "请显式指定一条覆盖它的 --route")
+            )
     return payload
 
 
@@ -358,10 +421,17 @@ def validate(payload, baseline):
 # 回读比对 —— 总兜底，覆盖所有意料之外的改写
 # ----------------------------------------------------------------------
 def normalize(v):
+    """归一化后再比对。
+
+    关键：**丢掉值为 None 的键**。controller 会把没写的字段补成 null 填回来 ——
+    例如写入 {"target": "172.16.0.0/24"} 会回读成 {"target": "...", "via": null}。
+    语义完全一致，但严格比对会报「被改写或丢弃」，把正常写入误判成失败，
+    还附带一句「控制器上的状态已经是错的」—— 那句话会把排查方向带偏。
+    """
     if isinstance(v, dict):
-        return {k: normalize(x) for k, x in sorted(v.items())}
+        return {k: normalize(x) for k, x in sorted(v.items()) if x is not None}
     if isinstance(v, list):
-        return [normalize(x) for x in v]
+        return [normalize(x) for x in v if x is not None]
     return v
 
 

@@ -90,11 +90,35 @@ planet 只在**首次**或**端点变化**时生成 —— 重启不会重新生
 管理脚本装进了镜像，所以**在容器内跑** —— 服务器上不需要装 python：
 
 ```bash
-docker compose exec ztplanet ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200
+docker compose exec ztplanet ztnet.py create --name homenet --private --mtu 2800 --pool 172.16.0.100-172.16.0.200 --route 172.16.0.0/24
 docker compose exec ztplanet ztnet.py set --dns-domain ztio.internal --dns-server 172.16.0.1 --v4-zt --v6-rfc4193
 ```
 
 `create` 会打印出 nwid（形如 `b021fa09d579af0f`）—— **记下来**，授权成员要用。
+
+> ### ⚠️ `--pool` 必须配一条覆盖它的 `--route`，否则谁都拿不到 IP
+>
+> 这不是可选的美化项，是 ZeroTier 控制器的硬逻辑。`controller/EmbeddedNetworkController.cpp` 里：
+>
+> ```cpp
+> // 成员被手动指定的地址
+> int routedNetmaskBits = -1;
+> for (rk...) if (routes[rk].target.containsAddress(ip)) routedNetmaskBits = ...;
+> if (routedNetmaskBits >= 0) { nc->staticIps[nc->staticIpCount++] = ip; }
+>
+> // 自动分配
+> if ((routedNetmaskBits > 0) && ...) { 分配 }
+> ```
+>
+> **地址只有落在某条 route 的覆盖范围内才会被下发。** 没有覆盖 pool 的路由时：
+>
+> - 网段、DNS、MTU **照常下发** —— 客户端 `status: OK`，`netconfRevision` 也对得上
+> - 但 `assignedAddresses` **永远是空数组**，`zerotier-cli listnetworks` 最后一列是 `-`
+> - 服务端**不报任何错**，`member.py` 里手写的 `ipAssignments` 也照样存着、照样不下发
+>
+> 也就是说这是个**完全静默**的失败：每一层看起来都正常，只有最终没有 IP。
+> 排查它花了整整一轮，所以 `ztnet.py` 现在会在**发请求之前**拦住这种情况并告诉你该加什么路由。
+
 
 其它子命令：
 
