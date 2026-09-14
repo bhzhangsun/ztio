@@ -97,6 +97,26 @@ else
     log "planet 已存在且端点未变，跳过生成"
 fi
 
+# ------------------------------------------------------------
+# 收紧敏感文件权限
+# ------------------------------------------------------------
+# mkworld 用默认 umask 创建 current.c25519 / previous.c25519，会落成 644。
+# 这两个文件是 planet 的**签名私钥**：能读它的人可以签发世界更新，把已入网
+# 设备全部指向他自己的根。宿主机的 uid 命名空间与容器不同 —— 容器里的
+# zerotier-one(999) 在宿主机上可能显示成某个系统账号，但那不代表只有它读得到。
+#
+# 所以在这里统一收到 600，而不是指望 mkworld 的 umask。
+# 每次启动都执行一次：以前版本创建的文件也会被纠正。
+if [ -d "$ZT_HOME" ]; then
+    chmod 700 "$ZT_HOME" 2>/dev/null || true
+    for _f in identity.secret authtoken.secret metricstoken.secret current.c25519 previous.c25519; do
+        if [ -f "$ZT_HOME/$_f" ]; then
+            chmod 600 "$ZT_HOME/$_f" 2>/dev/null || true
+        fi
+    done
+fi
+
+
 # 对外分发副本
 cp -f "$ZT_HOME/planet" "$DIST_DIR/planet"
 
