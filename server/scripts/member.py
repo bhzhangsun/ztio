@@ -109,7 +109,30 @@ class API:
         return r if isinstance(r, list) else []
 
     def members(self, nwid):
-        return self._req("GET", "/controller/network/%s/member" % nwid)
+        """返回 {地址: 成员记录}。
+
+        注意：GET /controller/network/<nwid>/member 返回的**不是**成员对象数组，
+        而是 {地址: revision} —— 例如 {"4911bad593": 1}。之前这里直接透传，
+        调用方拿到的是整数，一 .get() 就崩。
+
+        真正的成员记录（authorized / ipAssignments / vProto / creationTime…）
+        必须按地址逐个取。
+        """
+        listing = self._req("GET", "/controller/network/%s/member" % nwid)
+
+        addrs = []
+        if isinstance(listing, dict):
+            addrs = [a for a in listing.keys() if a]
+        elif isinstance(listing, list):
+            for m in listing:
+                a = m.get("address") if isinstance(m, dict) else m
+                if a:
+                    addrs.append(a)
+
+        return {
+            a: self._req("GET", "/controller/network/%s/member/%s" % (nwid, a))
+            for a in addrs
+        }
 
     def set_member(self, nwid, addr, patch):
         self._req("POST", "/controller/network/%s/member/%s" % (nwid, addr), patch)
