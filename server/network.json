@@ -1,12 +1,12 @@
 {
   "_README": [
-    "ztio 网络的声明式配置。scripts/apply-network.sh 会把它收敛到 controller 上。",
+    "ztio 网络的声明式配置。scripts/apply-network.py 会把它收敛到 controller 上。",
     "以 _ 开头的键只是文档，不会下发给 controller。",
     "",
     "为什么需要声明式：controller 的管理 API 只校验 JSON 语法，不校验语义。",
     "不合法的值会被静默改写而不是报错 —— mtu:\"abc\" 变成 1280、private:\"yes\" 变成 false、",
     "10.0.0.0/abc 变成 10.0.0.0/0（整个 IPv4 空间）。",
-    "apply-network.sh 的做法是写前预校验 + 写后回读比对，把这些静默错误变成显式失败。"
+    "apply-network.py 的做法是写前预校验 + 写后回读比对，把这些静默错误变成显式失败。"
   ],
 
   "networkId": "",
@@ -29,7 +29,7 @@
   "v4AssignMode": {
     "zt": true
   },
-  "_v4_note": "1.14.1 的 v4AssignMode 只支持 zt 这一个键。dhcp 键会被静默丢弃 —— ZeroTier 客户端没有 DHCP 客户端，地址一律由 controller 确定性分配并绑定成员身份。",
+  "_v4_note": "1.14.x 的 v4AssignMode 只支持 zt 这一个键。dhcp 键会被静默丢弃 —— ZeroTier 客户端没有 DHCP 客户端，地址一律由 controller 确定性分配并绑定成员身份。",
 
   "v6AssignMode": {
     "rfc4193": true,
