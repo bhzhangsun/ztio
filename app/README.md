@@ -179,12 +179,69 @@ onNetworkChanged()         → stream
 | **V1** | Dart FFI → libzt 在 iOS / Android 上可行 | **高（一票否决）** | 最小工程：`zts_node_start` 能被 Dart 调用并返回 |
 | **V2** | 出口能否把出站绑到指定链路 | **高** | Android `bindProcessToNetwork` 后抓包确认走蜂窝；iOS `NWParameters` 同理 |
 | V3 | Android 13+ `NEARBY_WIFI_DEVICES` 对局域网单播的实际限制 | 中 | 实测被拒后单播是否仍可用 |
-| **V4** | libzt 与 zerotier-one **1.14.2** 的 `vProto` 兼容性 | **高** | 检查成员对象的 `vProto` 字段 |
+| ~~V4~~ | ~~协议兼容性~~ | ✅ **已验证（2026-09-14）** | 见下方「V4 结论」 |
 | V5 | 移动端 libzt 是否支持 `local.conf` 的 `bind` | 中 | 实测 |
 | **V6** | `zts_init_set_roots` 的 `roots_data` 是 planet 二进制还是 `zts_root_set_t` | 中 | 读 libzt 源码（头文件只写 "binary"，实现没找到）；或最小工程实测 |
 
-> **V1、V2、V4 是一票否决级的。** 建议在写任何 UI 之前先验证这三项 ——
+> **V1、V2 是一票否决级的**（V4 已排除，见下）。建议在写任何 UI 之前先验证这两项 ——
 > 它们决定整个工程结构，越晚发现代价越大。
+
+### V4 结论：协议兼容，实测通过
+
+**2026-09-14 实测，不需要再验证。** 官方客户端 **1.16.2** 连自建 **1.14.2** controller：
+
+```
+controller 记录到的成员对象
+  vMajor   1
+  vMinor   16
+  vProto   13        ← 客户端自己报上来的
+  ...
+
+服务器侧 listpeers
+  4911bad593  123.138.183.207/57053  42  1.16.2  LEAF
+```
+
+`vProto` 能填上，说明节点**真的完成了控制层握手**（不是只发了个包）；
+`LEAF` 对端说明数据层也通了，直连 42ms。所以 1.14.2 的 controller 能服务
+1.16 的客户端，**跨两个次要版本没问题**。
+
+> **但这个结论只覆盖官方 zerotier-one 客户端，不覆盖 libzt。**
+> libzt 是另一份代码（`libzt/` 目录），它的 `vProto` 要单独实测 ——
+> V4 原来的表述是 "libzt 与 1.14.2 的兼容性"，这里验证的是官方客户端那条路径。
+> 真正写 app 时仍应先用 libzt 跑一次最小工程。
+
+另一个实测副产品：**macOS 上 ZeroTier 用 `feth` 接口，不是 `zt`**，
+而且是成对的（`feth1927` / `feth6927`，`peer:` 互指）。
+排查时 `ifconfig | grep zt` 是找不到东西的。
+
+### ⚠️ DNS 是**逐客户端**开关，默认关闭
+
+controller 下发了 `dns.domain = ztio.internal`、`dns.servers = [172.16.0.1]`，
+但官方客户端本地的实际状态是：
+
+```
+// networks.d/<nwid>.local.conf
+allowManaged=1
+allowGlobal=0
+allowDefault=0
+allowDNS=0        ← 关键：默认不接管 DNS
+```
+
+**`allowDNS=0` 意味着客户端不会用网络下发的 DNS** —— 也就是需求 #3
+（"在这个网段内用域名即可访问"）在默认设置下**不生效**。
+
+这必须由客户端一侧打开：
+
+```bash
+sudo zerotier-cli set <nwid> allowDNS=1
+```
+
+对照 libzt，对应的 API 是 `zts_init_set_...` 一族（需确认具体函数名，加入 V6 一起验证）。
+
+> 这条对 app 是硬需求：**app 必须在加入网络时自己把这个开关打开**，
+> 否则用户配了 DNS 却发现域名解析不了，而且看不出原因 —— controller 那边一切正常。
+> 它不是 bug，是 ZeroTier 刻意的安全默认值。
+
 
 **V1 不成立时的退路**：代理引擎下沉到原生，三端各一份实现。
 代价是三份逻辑需要同步演进，必须配一套共享测试向量集。
