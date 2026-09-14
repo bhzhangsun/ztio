@@ -111,3 +111,49 @@ ztio 是**应用层**方案，它依赖一套可用的 ZeroTier 控制面：
 | **锚点（Anchor）** | ZT 网络内地址固定、提供名字解析的节点 |
 | **路径（Path）** | 一条被确认可用、正在承载数据的连接 |
 | **降级（Fallback）** | 主路径失败后切换到次优先路径的行为 |
+| **同时发起** | Simultaneous Open，两端各自向对方发起，用于穿过状态防火墙 |
+
+---
+
+## 8. 仓库与提交
+
+**权威仓库在部署服务器上**，本机只作镜像。
+
+```
+git@github.com:bhzhangsun/ztio.git
+```
+
+### 服务器如何获得推送权限
+
+服务器通过**仓库级 Deploy Key** 推送（不是账号级 SSH Key）：
+
+| 项 | 值 |
+|---|---|
+| 私钥 | `/root/.ssh/ztio_deploy`（`600`，**无 passphrase**） |
+| 公钥 | 已添加到该仓库的 Deploy Keys，**勾选 Allow write access** |
+| 指纹 | `SHA256:uJW7s3G8nW3jnbeBUaEoPSjNtcEJiXLGK+EFFwigil4` |
+| 客户端配置 | `/root/.ssh/config` 的 `Host github.com` 段 + `IdentitiesOnly yes` |
+
+**用仓库级而非账号级**，是为了把泄露的爆炸半径限制在这一个仓库。
+
+### 验证
+
+```bash
+ssh -T git@github.com            # 身份：Hi bhzhangsun/ztio!
+git push origin main --dry-run   # 写权限
+```
+
+> `ssh -T` 只验证**身份**，不验**写权限** ——
+> Deploy Key 未勾选 `Allow write access` 时它照样成功，但 `push` 会 403。
+> 要确认写权限，用临时分支实测：
+> ```bash
+> git push origin main:refs/heads/__write_test
+> git push origin --delete __write_test
+> ```
+
+### ⚠️ 不要在两处同时提交
+
+本机镜像与服务器各有独立的 `.git`。**只在一处提交**，
+否则两侧历史会分叉，需要人工合并。
+
+**默认在服务器上提交**（它是权威副本，且现在可以直接推送）。
