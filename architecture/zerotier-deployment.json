@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "自建 ZeroTier 控制面：传输面与 App 转发面",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "join-path",
+        "label": "客户端如何入网",
+        "focus": [
+          "macapp",
+          "phoneapp",
+          "firewall",
+          "planet",
+          "controller"
+        ],
+        "note": "两个 App 都只碰一个公网端口 UDP 9993，信令与网络配置都从这里进。"
+      },
+      {
+        "id": "admin-path",
+        "label": "你如何管理",
+        "focus": [
+          "admin",
+          "ztnet",
+          "controller",
+          "trust"
+        ],
+        "note": "SSH 进来由 ztnet 调本地控制器 API，面板是同一 API 的另一个客户端。"
+      },
+      {
+        "id": "relay-path",
+        "label": "L5 转发（下一跳）",
+        "focus": [
+          "macapp",
+          "phoneapp",
+          "wan",
+          "nas"
+        ],
+        "note": "同网段优先 LAN 直连；跨网段时才由 Mac App 连手机的 ZT socket，手机用原生 IPv6 出去。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "admin",
+      "type": "external",
+      "label": "运维终端",
+      "sublabel": "SSH 密钥登录",
+      "pos": [
+        20,
+        40
+      ],
+      "size": [
+        146,
+        58
+      ]
+    },
+    {
+      "id": "ztnet",
+      "type": "backend",
+      "label": "ztnet 管理脚本",
+      "sublabel": "待实现",
+      "pos": [
+        560,
+        40
+      ],
+      "size": [
+        156,
+        58
+      ]
+    },
+    {
+      "id": "controller",
+      "type": "backend",
+      "label": "Controller",
+      "sublabel": "b021fa09d5",
+      "pos": [
+        800,
+        40
+      ],
+      "size": [
+        164,
+        62
+      ]
+    },
+    {
+      "id": "trust",
+      "type": "database",
+      "label": "信任根数据卷",
+      "sublabel": "identity / moon.json",
+      "pos": [
+        1040,
+        40
+      ],
+      "size": [
+        160,
+        58
+      ]
+    },
+    {
+      "id": "firewall",
+      "type": "security",
+      "label": "阿里云安全组",
+      "sublabel": "仅放行 UDP 9993",
+      "pos": [
+        560,
+        240
+      ],
+      "size": [
+        152,
+        62
+      ]
+    },
+    {
+      "id": "planet",
+      "type": "cloud",
+      "label": "Planet 根",
+      "sublabel": "b021fa09d5",
+      "pos": [
+        860,
+        240
+      ],
+      "size": [
+        162,
+        62
+      ]
+    },
+    {
+      "id": "nas",
+      "type": "security",
+      "label": "NAS · 网段内 DNS",
+      "sublabel": "172.16.0.1 · dnsmasq",
+      "pos": [
+        41,
+        406
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "macapp",
+      "type": "backend",
+      "label": "Mac App",
+      "sublabel": "libzt · 发起端",
+      "pos": [
+        251,
+        406
+      ],
+      "size": [
+        170,
+        62
+      ]
+    },
+    {
+      "id": "phoneapp",
+      "type": "backend",
+      "label": "手机 App",
+      "sublabel": "libzt · 双栈",
+      "pos": [
+        551,
+        406
+      ],
+      "size": [
+        170,
+        62
+      ]
+    },
+    {
+      "id": "wan",
+      "type": "external",
+      "label": "公网目标",
+      "sublabel": "经手机 IPv6 直达",
+      "pos": [
+        820,
+        406
+      ],
+      "size": [
+        160,
+        58
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "阿里云 ECS · 8.137.163.130",
+      "wraps": [
+        "firewall",
+        "planet",
+        "controller",
+        "ztnet",
+        "trust"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "ztplanet 容器",
+      "wraps": [
+        "planet",
+        "controller"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "ZeroTier 虚拟网络 172.16.0.0/24",
+      "wraps": [
+        "nas",
+        "macapp",
+        "phoneapp"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "admin",
+      "to": "ztnet",
+      "label": "SSH",
+      "variant": "security"
+    },
+    {
+      "from": "ztnet",
+      "to": "controller",
+      "label": "本地 API :9993"
+    },
+    {
+      "from": "controller",
+      "to": "trust",
+      "label": "读写身份",
+      "variant": "security"
+    },
+    {
+      "from": "firewall",
+      "to": "planet",
+      "label": "信令 / 打洞 / 中继",
+      "variant": "emphasis",
+      "labelAt": [
+        790,
+        292
+      ]
+    },
+    {
+      "from": "firewall",
+      "to": "controller",
+      "label": "配置请求与下发",
+      "variant": "emphasis"
+    },
+    {
+      "from": "macapp",
+      "to": "firewall",
+      "label": "UDP 9993",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "from": "phoneapp",
+      "to": "firewall",
+      "label": "UDP 9993",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "nas",
+      "to": "macapp",
+      "label": "DNS",
+      "variant": "dashed"
+    },
+    {
+      "from": "macapp",
+      "to": "phoneapp",
+      "label": "L5 转发（你的下一跳）",
+      "variant": "emphasis"
+    },
+    {
+      "from": "phoneapp",
+      "to": "wan",
+      "label": "IPv6 出口",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "公网暴露面",
+      "items": [
+        "安全组只放行 UDP 9993，这是唯一的公网入口",
+        "面板 3443 与文件服务 3000 走 SSH 隧道，不对公网开放",
+        "TCP 9993 是管理 API，任何时候都不要暴露"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "传输面与控制面分离",
+      "items": [
+        "libzt 给的是 socket 与私有 lwIP 栈，没有系统网卡——它是 socket 级对端，不是路由器",
+        "移动端无法把私有栈的包转交 WWAN，所以 ip_forward 这条路走不通",
+        "「下一跳」由 App 决定：目标不可达就 zts_bsd_connect 到中继节点，收端用原生 socket 出去"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "NAS 与普通成员的差别",
+      "items": [
+        "只有 NAS 跑 dnsmasq：只服务 172.16.0.0/24，不占任何公网端口",
+        "不做出口路由：不设 0.0.0.0/0 托管路由，无需 ip_forward / MASQUERADE",
+        "控制器 routes 只能设网络级 via，按节点的下一跳只能在 App 里做"
+      ]
+    }
+  ]
+}

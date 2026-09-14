@@ -1,0 +1,19 @@
+# ── archify 视觉回归产物 ──────────────────────────────────────
+# 可再生：archify visual-check <output.html>
+# 渲染后的 *.html 是交付物，提交；截图与回执不提交。
+*.visual-check.*
+*.png
+
+# ── 编辑器 / 系统 ─────────────────────────────────────────────
+.DS_Store
+._*
+*.swp
+.idea/
+.vscode/
+
+# ── 参考实现构建产物（结构预留）────────────────────────────────
+reference/**/build/
+reference/**/dist/
+reference/**/node_modules/
+reference/**/target/
+reference/**/.venv/
