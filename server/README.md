@@ -30,7 +30,7 @@ $EDITOR .env                 # 至少填 ZTIO_PUBLIC_IP4
 
 ```
 server/
-├── Dockerfile                  固定 1.14.1，装预编译包 + 只编译 mkworld
+├── Dockerfile                  固定 1.14.2，装预编译包 + 只编译 mkworld
 ├── docker-compose.yml
 ├── .env.example
 ├── entrypoint.sh               生成 identity / planet / local.conf
@@ -57,7 +57,7 @@ SSH 都无法完成握手**，只能靠控制台重启。而它换来的只是�
 | 来源 | 从目标服务器可达 | 结论 |
 |---|---|---|
 | `download.zerotier.com`（官方 apt 源 / 安装脚本） | ❌ 超时 | 不可用 |
-| GitHub Releases 的 `.deb` | ❌ 1.14.1 那个 release **没有任何附件** | 不存在 |
+| GitHub Releases 的 `.deb` | ❌ 各版本 release 都**没有任何附件** | 不存在 |
 | **`mirrors.sustech.edu.cn/zerotier/`** | ✅ HTTP 200 / 1.05s | **zerotier-one 的 .deb** |
 | `codeload.github.com` 源码 tarball | ✅ HTTP 200 / 0.98s | **只用来编译 mkworld** |
 
@@ -72,14 +72,50 @@ ARG ZT_SRC_URL=https://codeload.github.com/zerotier/ZeroTierOne/tar.gz/refs/tags
 
 两个来源都做成 build-arg，**换环境只需改这两行**（比如把镜像换成官方源或自建缓存）。
 
-### 两个必须知道的坑
+### mkworld 是什么，凭什么信它
+
+**`mkworld` 不是 ZeroTier 的运行时组件** —— ZeroTier 从不执行它。它只是生成 `planet`
+文件的运维工具，而 `planet` 才是 ZeroTier 真正读的东西。所以「mkworld 对不对」
+等价于「**它产出的 planet 能不能被别的节点接受**」。
+
+它编译自与运行阶段**完全相同的 tag** 的 `attic/world/mkworld.cpp`，只做了一处改动：
+把硬编码的 root 列表改成读环境变量（见 `patches/mkworld-env.py`）。上游那行注释原话是
+「If you want to make your own World you must edit this file.」
+
+**验证方式不是结构比对，是端到端行为验证** —— 起一个真实 leaf 节点，只喂给它我们生成的
+planet，看它是否把我们的 root 认成 `PLANET`。实测（1.14.2）：
+
+```
+=== leaf peers ===
+  4570a54054 1.14.2 PLANET    23 DIRECT   82   81   10.99.0.2/9993
+=== root peers ===
+  5619e0a634 1.14.2 LEAF       0 DIRECT   178  178  10.99.0.3/31842
+```
+
+leaf 认出的 `4570a54054` 正是 root 的 identity，路径 `10.99.0.2/9993` 正是烤进 planet
+的端点，且是 **DIRECT** 直连（23 ms）—— 说明 planet 的签名被接受、root 被信任、
+双向 VL1 会话建立完成。
+
+### 三个必须知道的坑
 
 **1. 换 `ZT_VERSION` 时必须同时换 `ZT_DEB_SHA256`。** 这是刻意的：宁可构建失败，
 也不要在不知情的情况下装上一个未校验的二进制。
 
-**2. 不要用 `dpkg-deb -x <deb> /`。** 实测会把镜像的 `/usr/bin` 清空 ——
-解包后 `ls`、`grep`、`dpkg-deb` 全部 "not found"，而那个 deb 里根本没有 `usr/bin/`。
-Dockerfile 里改成解到暂存目录再 `cp -a` 挑需要的 `usr/sbin`。
+**2. `dpkg -i` 会在容器里建一个 `zerotier-one` 系统用户**，于是 ZeroTier 启动时会尝试
+降权到它，在容器里失败并打这条警告：
+
+```
+zerotier-one: WARNING: failed to drop privileges (kernel may not support required
+prctl features), running as root
+```
+
+**无害**，它继续以 root 运行，功能不受影响。之所以记下来，是因为它容易让人误以为
+出了问题。要真正消除它得让容器整体以该用户运行，那需要额外处理数据卷属主 ——
+留作后续加固项，当前不阻塞。
+
+**3. 不要用 `dpkg-deb -x <deb> /`。** 实测会把镜像的 `/usr/bin` 清空 —— 解包后
+`ls`、`grep`、`dpkg-deb` 全部 "not found"，而那个 deb 里根本没有 `usr/bin/`。
+现在用 `dpkg -i`，不需要它了，但别改回去。
 
 ---
 
@@ -91,7 +127,7 @@ Dockerfile 里改成解到暂存目录再 `cp -a` 挑需要的 `usr/sbin`。
 ### 为什么必须「回读比对」
 
 controller 的管理 API **只校验 JSON 语法，不校验语义**。不合法的值会被**静默改写**而不是报错。
-实测（1.14.1）：
+实测（1.14.1 上首测，1.14.2 上逐项复现，结果完全一致）：
 
 | 写入 | 回读 |
 |---|---|
@@ -183,7 +219,7 @@ if ((_id == update._id) && (_ts < update._ts) && (_type == update._type)) {
 ### 2. 只能在 `via` 全网统一的前提下下发路由
 
 网络配置里的 `routes[].via` 对**所有成员**生效，而 **member 对象没有任何路由字段**。
-向成员 POST `routes` / `nextHop` 会被静默丢弃（已核对 1.14.1 的成员字段全集）。
+向成员 POST `routes` / `nextHop` 会被静默丢弃（已核对 1.14.2 的成员字段全集）。
 
 需要「每个节点走不同的出口」时，只能用 [应用层代理](../docs/exit-proxy.md)，不能用 IP 路由。
 
@@ -260,4 +296,5 @@ $EDITOR Dockerfile            # 改 ARG ZT_VERSION
 
 升级后 `zerotier-cli` / 管理 API 的字段可能有变化，`apply-network.py` 的回读比对会发现。
 
-> 注意：1.14.1 之前的版本不在 Apache 2.0 的 Change Date 覆盖范围内，授权不同。
+> 注意：1.14.2 是**最后一个** controller 仍在 `controller/`、受 BSL 覆盖的版本。
+> 1.16.0 起 controller 移入 `nonfree/`，改为仅限非商业 —— 所以不追新。

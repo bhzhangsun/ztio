@@ -166,15 +166,15 @@ def validate(cfg):
     v4 = cfg.get("v4AssignMode")
     if not isinstance(v4, dict):
         raise Invalid("v4AssignMode 必须是对象")
-    # 1.14.1 只认 zt 这一个键，dhcp 会被静默丢弃 —— 见了就提醒
+    # 1.14.x 只认 zt 这一个键，dhcp 会被静默丢弃 —— 见了就提醒（1.14.2 实测复现）
     if "dhcp" in v4:
         raise Invalid(
-            "v4AssignMode.dhcp 在 1.14.1 上不存在（实测：写了会被静默丢弃）。\n"
+            "v4AssignMode.dhcp 在 1.14.x 上不存在（实测：写了会被静默丢弃）。\n"
             "  而且 ZeroTier 客户端没有 DHCP 客户端，开了也没用。删掉这个键。"
         )
     unknown = set(v4) - {"zt"}
     if unknown:
-        raise Invalid("v4AssignMode 含未知键 %s（1.14.1 只支持 zt）" % sorted(unknown))
+        raise Invalid("v4AssignMode 含未知键 %s（1.14.x 只支持 zt）" % sorted(unknown))
     out["v4AssignMode"] = {"zt": want_bool(v4, "zt", "v4AssignMode")}
 
     v6 = cfg.get("v6AssignMode")

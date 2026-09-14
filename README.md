@@ -29,7 +29,7 @@ ztio/
 ├── docs/
 │   └── exit-proxy.md          ★ 出口代理设计 —— 唯一的核心文档
 ├── server/                    自建 planet + controller
-│   ├── Dockerfile             固定 ZeroTier 1.14.1，用预编译包（不编译源码）
+│   ├── Dockerfile             固定 ZeroTier 1.14.2，用预编译包（不编译源码）
 │   ├── network.json           网络的声明式定义
 │   ├── scripts/               deploy / apply-network / member / backup
 │   └── README.md
@@ -65,7 +65,7 @@ ztio/
 **这部分已被证伪并整个删除。** 核实后的结论是：ZeroTier VL1 已经完整实现了它，
 而且做得更多。
 
-| ztio 打算做的 | ZeroTier 1.14.1 里的实现 |
+| ztio 打算做的 | ZeroTier 1.14.2 里的实现 |
 |---|---|
 | 枚举本机接口地址并告知对端 | `node/Peer.cpp:212` —— `VERB_PUSH_DIRECT_PATHS`，每 15 秒推一次 |
 | 收到后尝试直连 | `node/IncomingPacket.cpp:1400` —— `attemptToContactAt` |
@@ -75,9 +75,9 @@ ztio/
 **libzt 也一样**（`libzt/src/NodeService.cpp:474-488` 枚举接口地址喂给核心）。
 所以同 WiFi 时 ZeroTier 会自动建立局域网直连，**不需要 app 做任何事**。
 
-> 顺带纠正一个曾经写进文档的错误说法：**1.14.1 没有**「针对对称型 NAT 的端口预测」
+> 顺带纠正一个曾经写进文档的错误说法：**1.14.x 没有**「针对对称型 NAT 的端口预测」
 > 机制（源码里搜不到 `predict` / `birthday` / `portScan` / `guessPort`）。
-> 那个说法来自当前官方文档，对 1.14.1 不成立。
+> 那个说法来自当前官方文档，对 1.14.x 不成立。
 
 ---
 
@@ -97,7 +97,7 @@ ztio/
 |---|---|---|
 | V1 | Dart FFI → libzt 在 iOS / Android 上可行 | **一票否决** |
 | V2 | 出口能否把出站绑到指定链路（蜂窝） | **高 —— 见下** |
-| V4 | libzt 与 zerotier-one 1.14.1 的 `vProto` 兼容性 | **高** |
+| V4 | libzt 与 zerotier-one 1.14.2 的 `vProto` 兼容性 | **高** |
 
 > **V2 是最容易静默失败的一项。** 如果出口只是 `Socket.connect`，它会走系统默认路由 ——
 > 也就是那条受限 WiFi。症状是「连接成功、数据流通、网页打不开」，从日志上看不出问题。
@@ -151,7 +151,7 @@ BSL 正文写明「**逐版本适用**，Change Date 可能不同」，同时有
 | 部分 | 许可 |
 |---|---|
 | 本仓库的文档与自有代码 | Apache 2.0（**尚未添加 LICENSE 文件**） |
-| **zerotier-one 1.14.1**（`server/`） | BSL 1.1 → Change Date 已过 → **Apache 2.0** |
+| **zerotier-one 1.14.2**（`server/`） | BSL 1.1 → Change Date 已过 → **Apache 2.0** |
 | **libzt**（`app/`） | BSL 1.1 → Change Date 已过 → **Apache 2.0** |
 | `attic/world/mkworld.cpp`（`server/` 编译它） | ⚠️ 文件头是 **GPLv3**，与仓库其余部分不同 |
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-把 ZeroTierOne 1.14.1 的 attic/world/mkworld.cpp 改成从环境变量读 root 配置。
+把 ZeroTierOne 的 attic/world/mkworld.cpp 改成从环境变量读 root 配置。
 
 为什么需要它
 ------------

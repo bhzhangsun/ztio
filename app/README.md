@@ -163,7 +163,7 @@ onNetworkChanged()         → stream
 | **V1** | Dart FFI → libzt 在 iOS / Android 上可行 | **高（一票否决）** | 最小工程：`zts_node_start` 能被 Dart 调用并返回 |
 | **V2** | 出口能否把出站绑到指定链路 | **高** | Android `bindProcessToNetwork` 后抓包确认走蜂窝；iOS `NWParameters` 同理 |
 | V3 | Android 13+ `NEARBY_WIFI_DEVICES` 对局域网单播的实际限制 | 中 | 实测被拒后单播是否仍可用 |
-| **V4** | libzt 与 zerotier-one **1.14.1** 的 `vProto` 兼容性 | **高** | 检查成员对象的 `vProto` 字段 |
+| **V4** | libzt 与 zerotier-one **1.14.2** 的 `vProto` 兼容性 | **高** | 检查成员对象的 `vProto` 字段 |
 | V5 | 移动端 libzt 是否支持 `local.conf` 的 `bind` | 中 | 实测 |
 
 > **V1、V2、V4 是一票否决级的。** 建议在写任何 UI 之前先验证这三项 ——

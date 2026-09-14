@@ -10,7 +10,7 @@
 #   - 用 latest 而不是固定版本，1.14.1 的 pin 纯属运气
 #   - 需要 /dev/net/tun + NET_ADMIN + SYS_ADMIN
 #
-# 本镜像把这些全部收掉：固定 1.14.1、只暴露 UDP 9993、不需要 TUN、不需要特权。
+# 本镜像把这些全部收掉：固定版本、只暴露 UDP 9993、不需要 TUN、不需要特权。
 #
 # 为什么不从源码构建 zerotier-one
 # ------------------------------
@@ -19,29 +19,34 @@
 #     node/*.cpp 内存峰值很高，实测把整台机器压进 swap 抖动到 SSH 都无法握手
 #   - 构建期强依赖 GitHub 可达，迁移性差
 #
-# 改成直接用预编译包：
-#   - 官方 download.zerotier.com 在目标服务器上不可达（实测超时）
+# 改成直接用官方预编译包：
+#   - download.zerotier.com 在目标服务器上不可达（实测超时）
 #   - 但南方科技大学镜像 mirrors.sustech.edu.cn/zerotier/ 可达，
 #     RELEASES/<版本>/dist/debian/<codename>/ 下有各版本的 .deb
-#   - 实测 3.2 MB / 1.2 秒，sha256 与官方一致（已核对）
+#   - 实测 3.2 MB / 0.5 秒，1.14.1 与 1.14.2 的 sha256 均已核对
 #
 # 构建时间因此从十几分钟降到十几秒，内存峰值低一个数量级。
 #
-# 为什么 1.14.1 而不是最新版
-# -------------------------
+# 为什么停在 1.14.2
+# -----------------
 # 1.16.0 起 ZeroTier 把 Controller 移到了 nonfree/ 目录，换成一份**仅限非商业**的
 # Source-Available 许可（它把「Commercial Use」定义得涵盖非营利组织）。
 # 1.14.x 仍在 BSL 1.1 下，Change Date 2026-01-01 已过 → **Apache 2.0**。
-# 所以自建 controller 就该停在 1.14.x。详见 README。
+# 1.14.2 是最后一个这样的版本，所以用它 —— 与 1.14.1 同许可，但更新。
+# 详见 README 的许可一节。
 
 # ============================================================
 # 构建阶段：只编译 mkworld
 # ============================================================
 # mkworld 不在发行包里（它是 attic 工具），必须自己编译。
 # 好在它只依赖 8 个小文件，几秒钟的事。
+#
+# 它只是**生成 planet 的运维工具**，不是 ZeroTier 的运行时组件 ——
+# 产物 planet 文件才是 ZeroTier 读的东西。所以版本对得上即可：
+# 这里用与运行阶段完全相同的 tag 取源码。
 FROM debian:12-slim AS mkworld
 
-ARG ZT_VERSION=1.14.1
+ARG ZT_VERSION=1.14.2
 ARG ZT_SRC_URL=https://codeload.github.com/zerotier/ZeroTierOne/tar.gz/refs/tags/${ZT_VERSION}
 
 RUN apt-get update \
@@ -68,37 +73,41 @@ RUN cd /src/attic/world \
 # ============================================================
 FROM debian:12-slim
 
-ARG ZT_VERSION=1.14.1
+ARG ZT_VERSION=1.14.2
 ARG ZT_DEB_URL=https://mirrors.sustech.edu.cn/zerotier/RELEASES/${ZT_VERSION}/dist/debian/bookworm/zerotier-one_${ZT_VERSION}_amd64.deb
 # 换 ZT_VERSION 时**必须**同时换这个哈希，否则构建会失败。
 # 这是刻意的：宁可失败，也不要在不知情的情况下装上一个未校验的二进制。
-ARG ZT_DEB_SHA256=6f6f8c0ed785b5f05b8d831b4f208f23c6ea8e91220f9f7d4417123873bb0317
+ARG ZT_DEB_SHA256=4be52f75df3557da57cf09979366a316cbe9bde618008d1031ccaa3babd163a0
 
 LABEL org.opencontainers.image.title="ztio planet+controller" \
       org.opencontainers.image.description="Self-hosted ZeroTier root (planet) and network controller, pinned to ${ZT_VERSION}" \
       org.opencontainers.image.source="https://github.com/bhzhangsun/ztio"
 
-# libstdc++6 与 openssl(libssl3) 是 zerotier-one 的运行时依赖（见包元信息 Depends）。
+# adduser / openssl 是 zerotier-one 的声明依赖（见包元信息 Depends），必须先装，
+# 否则 dpkg -i 会因依赖不满足而失败。
+# libstdc++6 / libssl3 由 debian:12-slim 基础层提供。
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl iproute2 jq tini libstdc++6 libssl3 \
+      ca-certificates curl iproute2 jq tini adduser openssl \
  && rm -rf /var/lib/apt/lists/*
 
-# 校验后解包。
+# 校验后用 dpkg -i 正常安装。
 #
-# 注意：**不要**用 `dpkg-deb -x <deb> /` —— 实测会把镜像的 /usr/bin 清空
-# （解包后 ls/grep/dpkg-deb 全部 "not found"）。解到暂存目录再挑需要的文件是安全的。
+# 早先这里写的是「dpkg-deb -x 解包再 cp」，理由是担心 postinst 在没有 systemd 的
+# 容器里失败。**实测那个担心是多余的**：debian 容器里 invoke-rc.d 因为
+# 「could not determine current runlevel」本来就拒绝启动服务，postinst 的
+# `|| exit 1` 不会触发，dpkg -i 退出码 0 且二进制就位。
 #
-# 用 dpkg-deb -x 而不是 dpkg -i：后者会跑 maintainer script，容器里没有 systemd，
-# 那些脚本只会报错。
+# 用 dpkg -i 而不是解包的好处：dpkg 记录了包，`dpkg -l` / `dpkg -V`（完整性校验）
+# 都能用，文件属主与权限也由 dpkg 负责。
 #
-# 解出来的 zerotier-cli 与 zerotier-idtool 是指向 zerotier-one 的符号链接
-# （ZeroTier 按 argv[0] 分派），cp -a 会保留符号链接。
+# 顺带记一个坑：**不要用 `dpkg-deb -x <deb> /`** —— 实测会把镜像的 /usr/bin 清空
+# （解包后 ls/grep/dpkg-deb 全部 "not found"），而那个 deb 里根本没有 usr/bin/。
+# 现在不需要它了，但别改回去。
 RUN curl -fsSL "${ZT_DEB_URL}" -o /tmp/zt.deb \
  && echo "${ZT_DEB_SHA256}  /tmp/zt.deb" | sha256sum -c - \
- && dpkg-deb -x /tmp/zt.deb /tmp/ztpkg \
- && cp -a /tmp/ztpkg/usr/sbin/. /usr/sbin/ \
- && rm -rf /tmp/ztpkg /tmp/zt.deb \
+ && dpkg -i /tmp/zt.deb \
+ && rm -f /tmp/zt.deb \
  && test -x /usr/sbin/zerotier-one \
  && test -L /usr/sbin/zerotier-cli \
  && test -L /usr/sbin/zerotier-idtool
@@ -113,6 +122,9 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
 # ZeroTier 的数据目录。identity、planet 签名密钥、controller 的 network 定义
 # 全在这里 —— 必须持久化，容器重建不能丢。
+#
+# 注意：包会在 /var/lib/zerotier-one 下放 zerotier-cli 等便捷符号链接。
+# 用 bind mount 挂载该目录时这些链接会被遮住 —— 无影响，/usr/sbin 下的才是正主。
 VOLUME ["/var/lib/zerotier-one"]
 
 # 对外分发的 planet / moon。

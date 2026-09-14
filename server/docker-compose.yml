@@ -13,9 +13,9 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        ZT_VERSION: "1.14.1"
+        ZT_VERSION: "1.14.2"
 
-    image: ztio/planet:1.14.1
+    image: ztio/planet:1.14.2
     container_name: ztplanet
     restart: unless-stopped
 
