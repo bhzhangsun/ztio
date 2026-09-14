@@ -4840,7 +4840,7 @@
       </div>
     </div>
 
-    <script id="archify-guided-views-data" type="application/json">[{"id":"connect-flow","label":"一次建连的全过程","focus":["app","sdk","anchor","zt","sdk2","app2"],"note":"引导 → 信令 → 并行探测 → 选定路径。全程不依赖公网发现服务，也不依赖组播。"},{"id":"data-path","label":"数据走哪条路","focus":["sdk","zt","sdk2"],"note":"局域网直连优先（免费、最快）；失败才退回 ZT，最差经自建 planet 中继兜底。"},{"id":"bootstrap","label":"引导（Bootstrap）","focus":["sdk","anchor","zt"],"note":"锚点地址固定、只在 ZT 网内可达，是唯一的「名字 → ZT 地址」解析入口。"}]</script>
+    <script id="archify-guided-views-data" type="application/json">[{"id":"connect-flow","label":"一次建连的全过程","focus":["app","sdk","anchor","zt","sdk2","app2"],"note":"引导 → 信令 → 并行探测 → 选定路径。全程不依赖公网发现服务，也不依赖组播。"},{"id":"data-path","label":"数据走哪条路","focus":["sdk","zt","sdk2"],"note":"直连优先（IPv6 / 局域网，成本 0）；失败才退回 ZT，最差经自建 planet 中继兜底。"},{"id":"bootstrap","label":"引导（Bootstrap）","focus":["sdk","anchor","zt"],"note":"锚点地址固定、只在 ZT 网内可达，是唯一的「名字 → ZT 地址」解析入口。"}]</script>
 
     <div class="guided-views no-print" id="guided-views" hidden aria-label="Guided diagram views">
       <button id="guided-view-prev" type="button" aria-label="Previous guided view" title="Previous guided view ([)">&#8592;</button>
@@ -4921,7 +4921,7 @@
         <!-- Connection paths (before components for correct z-order) -->
         <path data-edge-from="app" data-edge-to="sdk" data-edge-label="connect(peer)" data-edge-key="0" data-composition-points="135,98;135,122;156,122;156,176;140,176;140,200" d="M 135 98 L 135 114 Q 135 122 143 122 L 148 122 Q 156 122 156 130 L 156 168 Q 156 176 148 176 L 148 176 Q 140 176 140 184 L 140 200" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="app2" data-edge-to="sdk2" data-edge-label="listen" data-edge-key="1" data-composition-points="965,98;965,122;986,122;986,176;970,176;970,200" d="M 965 98 L 965 114 Q 965 122 973 122 L 978 122 Q 986 122 986 130 L 986 168 Q 986 176 978 176 L 978 176 Q 970 176 970 184 L 970 200" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="sdk" data-edge-to="sdk2" data-edge-label="局域网直连 · 主路径" data-edge-key="2" data-composition-points="230,233;880,233" d="M 230 233 L 880 233" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="sdk" data-edge-to="sdk2" data-edge-label="IPv6 / 局域网直连 · 主路径" data-edge-key="2" data-composition-points="230,233;880,233" d="M 230 233 L 880 233" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="sdk" data-edge-to="zt" data-edge-label="入网 · 信令" data-edge-key="3" data-composition-points="140,266;140,290;406,290;406,401;430,401" d="M 140 266 L 140 282 Q 140 290 148 290 L 398 290 Q 406 290 406 298 L 406 393 Q 406 401 414 401 L 430 401" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="sdk2" data-edge-to="zt" data-edge-label="入网 · 信令" data-edge-key="4" data-composition-points="970,266;970,290;664,290;664,394;640,394" d="M 970 266 L 970 282 Q 970 290 962 290 L 672 290 Q 664 290 664 298 L 664 386 Q 664 394 656 394 L 640 394" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="zt" data-edge-to="anchor" data-edge-label="查花名册" data-edge-key="5" data-composition-points="640,408;790,408" d="M 640 408 L 790 408" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
@@ -5008,9 +5008,9 @@
           <rect x="956.1" y="102" width="38.8" height="14" rx="3" class="c-mask"/>
           <text x="975.5" y="112" class="t-muted" font-size="8" text-anchor="middle">listen</text>
         </g>
-        <g data-detail="context" data-edge-from="sdk" data-edge-to="sdk2" data-edge-label="局域网直连 · 主路径" data-edge-key="2">
-          <rect x="504.4" y="213" width="101.2" height="14" rx="3" class="c-mask"/>
-          <text x="555" y="223" class="t-backend" font-size="8" text-anchor="middle">局域网直连 · 主路径</text>
+        <g data-detail="context" data-edge-from="sdk" data-edge-to="sdk2" data-edge-label="IPv6 / 局域网直连 · 主路径" data-edge-key="2">
+          <rect x="487.6" y="213" width="134.8" height="14" rx="3" class="c-mask"/>
+          <text x="555" y="223" class="t-backend" font-size="8" text-anchor="middle">IPv6 / 局域网直连 · 主路径</text>
         </g>
         <g data-detail="context" data-edge-from="sdk" data-edge-to="zt" data-edge-label="入网 · 信令" data-edge-key="3">
           <rect x="241.6" y="270" width="62.8" height="14" rx="3" class="c-mask"/>
@@ -5227,13 +5227,13 @@
       <div class="card">
         <div class="card-header">
           <div class="card-dot cyan"></div>
-          <h3>路径优先级</h3>
+          <h3>路径优先级与 IPv4 / IPv6 的分野</h3>
         </div>
         <ul>
-          <li>&bull; ① 局域网直连：免费、最快、不出公网 —— 主路径</li>
-          <li>&bull; ② ZT DIRECT：打洞成功，公网点对点</li>
-          <li>&bull; ③ ZT RELAY：经自建 planet 中继 —— 兜底</li>
-          <li>&bull; 探测并行发起、先通则赢；未选中的候选保留为温候选，用于自愈</li>
+          <li>&bull; ① 直连：IPv6 / 局域网 —— 成本 0，主路径</li>
+          <li>&bull; ② ZT DIRECT；③ ZT RELAY（经 planet 中继兜底）</li>
+          <li>&bull; IPv4 要解决地址变换，IPv6 没有 —— 故探测必须双向同时发起</li>
+          <li>&bull; 档内按实测 RTT 排，不按地址族</li>
         </ul>
       </div>
 
@@ -5243,9 +5243,9 @@
           <h3>为什么不需要公网 rendezvous</h3>
         </div>
         <ul>
-          <li>&bull; rendezvous 只解决「发现」；而「可达」那一层本来就没坏</li>
-          <li>&bull; ZT 链路本身就是一条永远可用的信令通道（最差经中继）</li>
-          <li>&bull; 锚点放在 ZT 网内：零公网暴露、内网拓扑不外流、无单点</li>
+          <li>&bull; rendezvous 只解决「发现」</li>
+          <li>&bull; ZT 链路本身就是永远可用的信令通道</li>
+          <li>&bull; 锚点在 ZT 网内：零暴露、无单点</li>
         </ul>
       </div>
 
@@ -5255,9 +5255,9 @@
           <h3>平台约束</h3>
         </div>
         <ul>
-          <li>&bull; iOS 14+ 本地网络权限：被拒则局域网路径静默失效，必须显式降级并引导授权</li>
+          <li>&bull; iOS 14+ 本地网络权限被拒则直连静默失效</li>
           <li>&bull; Android 13+ 需 NEARBY_WIFI_DEVICES</li>
-          <li>&bull; 必须过滤 utun / tun / zt 虚拟接口，否则局域网直连会静默退化为绕 ZT</li>
+          <li>&bull; 必须过滤 utun / tun / zt 虚拟接口</li>
         </ul>
       </div>
     </div>
