@@ -1,4 +1,4 @@
-# planet —— 本部署的世界定义
+# resources/planet —— 本部署的世界定义
 
 `planet` 就是 ZeroTier 的 **World** 文件（257 字节二进制）。它是**公开信息**：
 只有公钥、签名和端点地址，**没有任何私钥**。见下面「里面有什么」。
@@ -68,6 +68,9 @@
 
 所以对用户分发来说，**自带 app 是唯一通道**，planet 必须随包发。既然如此，
 它就是 app 的构建资产 —— 和图标、字体同性质 —— 那它就该在仓库里。
+
+**放在 `resources/` 下，而不是散在仓库根目录**：`resources/` 只装**输入**
+（当前只有这一个 world 文件），运行时的东西一律不进仓库。
 
 顺带它还能当官方桌面客户端的「分发副本」，一份东西两个用途。
 
@@ -160,10 +163,10 @@ ZTS_API int ZTCALL zts_init_set_roots(const void* roots_data, unsigned int len);
 # 服务器上
 cd /root/ztio/server
 ./scripts/deploy.sh                 # 结束时会打印 planet md5
-cp /var/lib/ztio/dist/planet ../../planet/planet
+cp /var/lib/ztio/dist/planet ../resources/planet
 
-# 本地校验
-md5sum planet/planet                # 必须与 deploy.sh 打印的一致
+# 同一个 shell 里接着校验
+md5sum ../resources/planet          # 必须与 deploy.sh 打印的一致
 ```
 
 然后在 `server/README.md` 的表格里核对该 md5。
@@ -177,15 +180,17 @@ md5sum planet/planet                # 必须与 deploy.sh 打印的一致
 ## 校验
 
 ```bash
+cd /root/ztio                        # 或本机 clone 下来的仓库根目录
+
 # 大小必须是 257 字节
-wc -c planet/planet
+wc -c resources/planet
 
 # 世界 ID 必须是 149604618（第 1-8 字节，大端）
-xxd -s 1 -l 8 -p planet/planet        # 应为 0000000008eac90a
+xxd -s 1 -l 8 -p resources/planet        # 应为 0000000008eac90a
 
 # root 地址必须是 46e6a67371（第 178-182 字节）
-xxd -s 178 -l 5 -p planet/planet      # 应为 46e6a67371
+xxd -s 178 -l 5 -p resources/planet      # 应为 46e6a67371
 
 # 私钥长度字段必须是 0（第 248 字节）
-xxd -s 248 -l 1 -p planet/planet      # 应为 00
+xxd -s 248 -l 1 -p resources/planet      # 应为 00
 ```

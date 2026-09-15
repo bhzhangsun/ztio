@@ -81,11 +81,11 @@ libzt: bind/listen/accept  ──→  宿主机栈: Socket.connect  ──→  �
 所以 app **必须自带** planet，否则用户连不上我们自己的网络：
 
 ```
-planet/planet                     ← 仓库根目录，随 app 打包
+resources/planet                  ← 仓库根目录，随 app 打包
 ```
 
 完整说明、文件格式、以及「什么情况下换 planet 会被静默拒绝」见
-[`../planet/README.md`](../planet/README.md)。两条要点：
+[`../resources/README.md`](../resources/README.md)。两条要点：
 
 1. **`zts_init_set_roots()` 必须在 `zts_node_start()` 之前调用** —— 顺序错了会静默退回官方根
 2. **要同时关掉根缓存**（`zts_init_allow_roots_cache(0)`），否则已装用户缓存着旧 planet，

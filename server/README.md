@@ -654,7 +654,7 @@ shasum -a 256 ztio-*.tar.gz     # 与服务器上的 sha256sum 比对
 > 归档小（<2 KB 起），丢了 `identity.secret` 和 `current.c25519` 才是真的没救 ——
 > 那意味着所有已安装的 app 永久失联，只能发新版强制用户更新，而**新版也救不回来**
 > （老用户的 libzt 缓存着旧密钥签的 planet，新 planet 验签不过会被静默丢弃）。
-> 详见 [`../planet/README.md`](../planet/README.md)。
+> 详见 [`../resources/README.md`](../resources/README.md)。
 
 ---
 
