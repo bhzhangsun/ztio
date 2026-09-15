@@ -724,11 +724,18 @@ planet 签名密钥、controller 定义的网络 —— 不受影响，
 
 ### 成员对象支持 `name` 字段（实测确认）
 
-ZeroTier 的成员对象**有名字这个概念**，可以直接写：
+ZeroTier 的成员对象**有名字这个概念**，`member.py name` 就是它的入口：
 
 ```bash
-docker compose exec ztplanet member.py set <nwid> <ztaddr> --name macbook
+docker compose exec ztplanet member.py name <ztaddr> macbook     # 起名字
+docker compose exec ztplanet member.py name <ztaddr> --clear     # 清掉，退回用地址前缀
+docker compose exec ztplanet member.py list                      # list 里有一列「名字」
 ```
+
+名字**会原样变成 DNS 标签**（`<名字>.<zone>`），所以命令会挡住非法字符：
+只允许 `[A-Za-z0-9-]`、不能以连字符开头或结尾、长度 ≤ 63。
+不挡的话，一个带空格或中文的名字会生成一条永远匹配不到、也永远解析不了的
+记录 —— 症状是「名字设了但 dig 查不到」，很难排查。
 
 实测（1.14.2 controller）：写入 `{"name":"macbook","description":"test","hostname":"mbp"}`，
 回读后 **只有 `name` 留下**（revision 7 → 8），`description` / `hostname` 被丢弃。

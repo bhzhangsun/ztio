@@ -14,9 +14,15 @@
     ./member.py rm <地址...>             彻底移除成员
     ./member.py ip <地址> <IPv4>         给成员指定固定地址（覆盖自动分配）
     ./member.py ip <地址> --clear        清掉固定地址，回到自动分配
+    ./member.py name <地址> <名字>       给成员起名字（ztio-dns 的 A 记录用它）
+    ./member.py name <地址> --clear      清掉名字，DNS 里退回用地址前缀
 
 地址是 10 位十六进制，即设备的 ZeroTier 地址。设备第一次 join 时会出现在
 `pending` 里 —— 因为网络是 private=true，未授权就什么也做不了。
+
+`name` 不是装饰：ztio-dns 的 A 记录就是从成员名派生的（`<名字>.<zone>`），
+没有名字时才退化成 `<地址前 10 位>.<zone>`。所以给设备起名字，等于决定
+DNS 里能不能用人类可读的名字。
 """
 
 import argparse
@@ -139,7 +145,12 @@ class API:
         # 回读验证：controller 对不认识的字段是静默丢弃
         got = self._req("GET", "/controller/network/%s/member/%s" % (nwid, addr))
         for k, v in patch.items():
-            if got.get(k) != v:
+            actual = got.get(k)
+            # 空字符串是「清空」语义：controller 可能把字段整个丢掉，而不是
+            # 存成 ""。两者对调用方等价，所以只在非空时要求严格相等。
+            if v == "" and not actual:
+                continue
+            if actual != v:
                 raise SystemExit(
                     "❌ 回读比对失败：%s 写入 %r，回读 %r" % (k, v, got.get(k))
                 )
@@ -196,15 +207,19 @@ def cmd_list(api, nwid, args):
         print("（没有成员。设备 join 后会出现在这里。）")
         return 0
 
-    print("%-12s %-6s %-18s %-16s %s" % ("地址", "已授权", "分配地址", "首次出现", "最后授权"))
-    print("-" * 78)
+    print(
+        "%-12s %-14s %-6s %-18s %-16s %s"
+        % ("地址", "名字", "已授权", "分配地址", "首次出现", "最后授权")
+    )
+    print("-" * 94)
     for addr in sorted(ms):
         m = ms[addr]
         ips = ",".join(m.get("ipAssignments") or []) or "-"
         print(
-            "%-12s %-6s %-18s %-16s %s"
+            "%-12s %-14s %-6s %-18s %-16s %s"
             % (
                 addr,
+                m.get("name") or "-",
                 "是" if m.get("authorized") else "否",
                 ips,
                 fmt_ts(m.get("creationTime")),
@@ -289,6 +304,37 @@ def cmd_ip(api, nwid, args):
     return 0
 
 
+def cmd_name(api, nwid, args):
+    """给成员起名字。
+
+    名字会**原样**变成 DNS 标签（`<名字>.<zone>`），所以这里必须挡住非法字符：
+    一个带空格或中文的名字会生成一条永远匹配不到、也永远解析不了的记录，
+    症状是「名字设了但 dig 查不到」，排查起来很费劲。
+    """
+    import re
+
+    if args.clear:
+        name = ""
+    else:
+        if not args.name:
+            raise SystemExit("需要给出名字，或用 --clear")
+        name = args.name.strip()
+        if not re.match(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$", name):
+            raise SystemExit(
+                "名字不合法：%r\n"
+                "  它会原样变成 DNS 标签（<名字>.<zone>），所以只允许 [A-Za-z0-9-]，\n"
+                "  不能以连字符开头或结尾，长度不超过 63。" % name
+            )
+
+    addr = args.addr[0]
+    m = api.set_member(nwid, addr, {"name": name})
+    print(
+        "  %s 的名字现在是：%s"
+        % (addr, m.get("name") or "（无 —— DNS 里退回用 <地址>.<zone>）")
+    )
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="ztio 成员管理")
     ap.add_argument("--nwid", help="网络 ID。省略时若 controller 上只有一个网络则自动选它")
@@ -315,6 +361,11 @@ def main():
     p.add_argument("ip", nargs="?", help="IPv4 地址")
     p.add_argument("--clear", action="store_true", help="清掉固定地址")
 
+    p = sub.add_parser("name", help="给成员起名字（ztio-dns 的 A 记录用它）")
+    p.add_argument("addr", nargs=1)
+    p.add_argument("name", nargs="?", help="名字，只允许 [A-Za-z0-9-]")
+    p.add_argument("--clear", action="store_true", help="清掉名字，退回用地址前缀")
+
     args = ap.parse_args()
 
     token_path = find_token(args.token_file)
@@ -328,6 +379,7 @@ def main():
         "deauthorize": cmd_deauthorize,
         "rm": cmd_rm,
         "ip": cmd_ip,
+        "name": cmd_name,
     }[args.cmd](api, nwid, args)
 
 
