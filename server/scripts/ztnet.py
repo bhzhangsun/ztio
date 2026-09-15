@@ -59,6 +59,7 @@ import ipaddress
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -171,6 +172,23 @@ class Controller:
 
     def delete(self, nwid):
         return self._req("DELETE", "/controller/network/" + nwid)
+
+    # ---- 成员 ----
+    def member_get(self, nwid, addr):
+        return self._req("GET", "/controller/network/%s/member/%s" % (nwid, addr))
+
+    def member_set(self, nwid, addr, payload):
+        return self._req("POST", "/controller/network/%s/member/%s" % (nwid, addr), payload)
+
+    # ---- 本地节点 ----
+    # base 是同一个 http://127.0.0.1:9993，但两套路径分属不同平面：
+    #   /controller/...  控制面：管理网络定义和成员
+    #   /network/...     本地节点自己：加入/退出网络
+    def join(self, nwid):
+        return self._req("POST", "/network/" + nwid, {})
+
+    def leave(self, nwid):
+        return self._req("DELETE", "/network/" + nwid)
 
 
 # ----------------------------------------------------------------------
@@ -463,6 +481,93 @@ def check_dns_root_unique(zt, nwid, payload):
             )
 
 
+def dns_ip_from_routes(routes):
+    """从网络的 IPv4 路由推出 DNS 应占的地址 —— 网段的第一个 IP。
+
+    为什么是第一个 IP：有了 DNS 之后用户是按**名字**访问的（nas.<zone>），
+    IP 对用户不再有意义，所以没有理由为任何设备预留 .1。DNS 占第一个地址
+    最自然；其它服务（NAS / 网关）用的时候加一条 DNS 记录即可，IP 交给池子。
+
+    为什么必须落在 route 覆盖范围内：controller 只把「落在某条 route 里」的
+    地址下发给成员，否则客户端拿不到，DNS 也就无从访问。
+
+    为什么必须在 pool 之外：否则自动分配会把它分给别的成员（见 dns_ip_in_pool）。
+    """
+    for r in (routes or []):
+        t = r.get("target") if isinstance(r, dict) else None
+        if not t:
+            continue
+        try:
+            net = ipaddress.ip_network(str(t), strict=False)
+        except ValueError:
+            continue
+        if net.version != 4 or net.num_addresses < 4:
+            continue
+        return str(net.network_address + 1)
+    return None
+
+
+def dns_ip_in_pool(dns_ip, pools):
+    """DNS 地址不能落在分配池里 —— 否则会被自动分配给别人。"""
+    try:
+        ip = ipaddress.ip_address(dns_ip)
+    except ValueError:
+        return False
+    for pool in (pools or []):
+        if not isinstance(pool, dict):
+            continue
+        try:
+            s0 = ipaddress.ip_address(str(pool.get("ipRangeStart")))
+            e0 = ipaddress.ip_address(str(pool.get("ipRangeEnd")))
+        except (ValueError, TypeError):
+            continue
+        if s0.version == 4 and s0 <= ip <= e0:
+            return True
+    return False
+
+
+def setup_dns_member(zt, nwid, dns_ip, name="dns", quiet=False):
+    """把 controller 这个节点自己加入网络，并固定占用 dns_ip。
+
+    为什么 DNS 必须是网络成员，而 controller 不需要：
+      controller 是**控制面** —— 客户端走 ZeroTier 自己的协议跟它说话，不发 IP 包，
+      所以它不必属于任何网络。
+      DNS 是**数据面** —— 客户端要往一个 IP（dns_ip:53）发 UDP 包。而 ZeroTier 里
+      一个 IP 要可达，必须映射到「和客户端同在某个网络里的成员」—— 对等连接
+      是按共同网络建立的。所以 DNS 必须真的在这个网络里。
+    """
+    addr = zt.status()["address"]
+
+    def say(m):
+        if not quiet:
+            print(m)
+
+    say("  → 把服务器节点加入网络…")
+    zt.join(nwid)
+
+    # join 会触发一次 config 请求，controller 据此建立成员档案。
+    for _ in range(30):
+        try:
+            zt.member_get(nwid, addr)
+            break
+        except SystemExit:
+            time.sleep(1)
+    else:
+        raise Invalid(
+            "已发起加入，但 30 秒内没等到成员档案。\n"
+            "    网络是 private 的，成员档案要等节点请求配置后才建立。\n"
+            "    可以稍后重试：ztnet.py dns-setup " + nwid
+        )
+
+    say("  → 授权并固定地址 %s，名字设为 %r…" % (dns_ip, name))
+    zt.member_set(nwid, addr, {
+        "authorized": True,
+        "ipAssignments": [dns_ip],
+        "name": name,
+    })
+    return addr
+
+
 def validate(payload, baseline):
     """请求之前的检查：字段在不在、类型对不对。"""
     allowed = set(writable_fields(baseline))
@@ -626,6 +731,92 @@ def cmd_fields(zt, args):
     return 0
 
 
+def _finish_dns(zt, nwid, payload, args):
+    """create 的最后一步：把 DNS 装进新网络。
+
+    刻意放在网络配置写完之后、且与回滚路径分开 —— DNS 装不上是「网络可用但
+    没有名字解析」，不该把整个网络删掉。
+    """
+    if getattr(args, "no_dns", False):
+        print("\n--no-dns：跳过 DNS 装配。")
+        return 0
+
+    dns = payload.get("dns") or {}
+    domain = dns.get("domain")
+    if not domain:
+        print("\n⚠️ 没给 --dns-domain，跳过 DNS 装配 —— 没有 zone 无从应答。")
+        print("   稍后可补：ztnet.py dns-setup %s --domain xxx.internal" % nwid)
+        return 0
+
+    dns_ip = dns_ip_from_routes(payload.get("routes"))
+    if not dns_ip:
+        print("\n❌ 要装 DNS，但 routes 里没有可用的 IPv4 网段，推不出地址。")
+        print("   DNS 必须占网段里的一个地址，客户端才访问得到。")
+        print("   加一条局域网路由（--route 172.16.0.0/24），或用 --no-dns 明确不要。")
+        return 1
+
+    if dns_ip_in_pool(dns_ip, payload.get("ipAssignmentPools")):
+        print("\n❌ DNS 地址 %s 落在分配池里 —— 它会被自动分配分给别的成员。" % dns_ip)
+        print("   池子的起点必须排在 DNS 之后，例如 --pool %s-..."
+              % (ipaddress.ip_address(dns_ip) + 1))
+        return 1
+
+    print("\n装配 DNS…")
+    try:
+        setup_dns_member(zt, nwid, dns_ip,
+                         name=(getattr(args, "dns_name", None) or "dns"))
+        merged = dict(dns)
+        merged["servers"] = [dns_ip]
+        zt.patch(nwid, {"dns": merged})
+        print("\n✅ DNS 已装入网络")
+        print("   zone     : %s" % domain)
+        print("   地址     : %s  （网段第一个 IP，dns.servers 已指向它）" % dns_ip)
+        print("   自带记录 : dns.%s → %s" % (domain, dns_ip))
+        print("\n   客户端还要各自打开 —— ZeroTier 默认不接管 DNS：")
+        print("     sudo zerotier-cli set %s allowDNS=1" % nwid)
+        return 0
+    except BaseException as e:
+        print("\n⚠️ DNS 装配失败：%s" % e)
+        print("   网络本身是好的，只是 DNS 没装上。稍后可重试：")
+        print("   ztnet.py dns-setup %s --domain %s" % (nwid, domain))
+        return 1
+
+
+def cmd_dns_setup(zt, args):
+    """给已存在的网络补装 DNS（create 已自动做过，这里是补做入口）。"""
+    nwid = need_nwid(zt, args.nwid)
+    net = zt.get(nwid)
+
+    dns_ip = args.ip or dns_ip_from_routes(net.get("routes"))
+    if not dns_ip:
+        raise SystemExit(
+            "FATAL: 推不出 DNS 地址 —— 这个网络没有可用的 IPv4 route。\n"
+            "  DNS 必须占网段里的一个地址。先加一条局域网路由：\n"
+            "    ztnet.py set %s --route 172.16.0.0/24" % nwid
+        )
+    if dns_ip_in_pool(dns_ip, net.get("ipAssignmentPools")):
+        raise SystemExit(
+            "FATAL: DNS 地址 %s 落在分配池里，会被自动分配分给别的成员。\n"
+            "  把池子起点往后挪，或者用 --ip 显式指定一个池外的地址。" % dns_ip
+        )
+
+    print("网络     : %s（%s）" % (nwid, net.get("name")))
+    print("DNS 地址 : %s" % dns_ip)
+    print()
+    setup_dns_member(zt, nwid, dns_ip, name=(args.name or "dns"))
+
+    dns = dict(net.get("dns") or {})
+    dns["servers"] = [dns_ip]
+    if args.domain:
+        dns["domain"] = args.domain
+    zt.patch(nwid, {"dns": dns})
+
+    print("\n✅ DNS 已装入网络")
+    print("   dns = %s" % json.dumps(dns, ensure_ascii=False))
+    print("\n   客户端还要各自打开：sudo zerotier-cli set %s allowDNS=1" % nwid)
+    return 0
+
+
 def cmd_create(zt, args):
     addr = zt.status()["address"]
     payload = build_payload(args)
@@ -664,6 +855,7 @@ def cmd_create(zt, args):
         except SystemExit:
             print("⚠️ 回滚失败 —— 请手动执行：ztnet.py rm %s --yes" % nwid)
     else:
+        rc = _finish_dns(zt, nwid, payload, args)
         print("\n记住这个 ID —— 它不会再被打印第二次。查看：ztnet.py ls")
     return rc
 
@@ -746,6 +938,10 @@ def main():
 
     p = sub.add_parser("create", help="创建网络")
     add_write_opts(p)
+    p.add_argument("--no-dns", action="store_true",
+                   help="不要自动装配 DNS（默认会给新网络装一个）")
+    p.add_argument("--dns-name", metavar="名字",
+                   help="DNS 成员名字，会成为 dns.<zone> 记录（默认 dns）")
     p.set_defaults(fn=cmd_create)
 
     p = sub.add_parser("set", help="修改字段")
@@ -757,6 +953,13 @@ def main():
     p.add_argument("nwid", nargs="?")
     p.add_argument("--yes", action="store_true")
     p.set_defaults(fn=cmd_rm)
+
+    p = sub.add_parser("dns-setup", help="给已存在的网络补装 DNS")
+    p.add_argument("nwid", nargs="?", help="不传时自动选唯一的网络")
+    p.add_argument("--ip", metavar="地址", help="显式指定 DNS 占用的地址")
+    p.add_argument("--domain", metavar="域名", help="同时设置 dns.domain")
+    p.add_argument("--name", metavar="名字", help="DNS 成员的名字（默认 dns）")
+    p.set_defaults(fn=cmd_dns_setup)
 
     args = ap.parse_args()
 
