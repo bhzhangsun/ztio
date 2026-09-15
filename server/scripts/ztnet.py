@@ -184,8 +184,20 @@ class Controller:
     # base 是同一个 http://127.0.0.1:9993，但两套路径分属不同平面：
     #   /controller/...  控制面：管理网络定义和成员
     #   /network/...     本地节点自己：加入/退出网络
-    def join(self, nwid):
-        return self._req("POST", "/network/" + nwid, {})
+    def join(self, nwid, node=None):
+        """让**某个**节点加入网络。
+
+        默认是本进程直连的那个节点（容器内的 127.0.0.1:9993）。
+        node 用于指定别的节点 —— 例如 ztio-dns 容器里的那个。
+        """
+        if node is None:
+            return self._req("POST", "/network/" + nwid, {})
+        return self._req_at(node, "POST", "/network/" + nwid, {})
+
+    def _req_at(self, base, method, path, body=None):
+        """对另一个节点的管理 API 发请求。"""
+        other = Controller(base, self.token)
+        return other._req(method, path, body)
 
     def leave(self, nwid):
         return self._req("DELETE", "/network/" + nwid)
@@ -536,14 +548,19 @@ def setup_dns_member(zt, nwid, dns_ip, name="dns", quiet=False):
       一个 IP 要可达，必须映射到「和客户端同在某个网络里的成员」—— 对等连接
       是按共同网络建立的。所以 DNS 必须真的在这个网络里。
     """
-    addr = zt.status()["address"]
+    addr = dns_node_address()
 
     def say(m):
         if not quiet:
             print(m)
 
-    say("  → 把服务器节点加入网络…")
-    zt.join(nwid)
+    # 加入网络这件事由 ztio-dns 容器自己的 entrypoint 完成（它启动时会 join）。
+    # 这里**不**代它 join：那个节点的管理 API 用 allowManagementFrom 锁在容器内，
+    # 从外面发不进去 —— 那道锁是刻意加的，不该为了图省事放开。
+    #
+    # 所以这里只等成员档案出现。节点 join 时会向 controller 请求配置，
+    # controller 据此建立档案；档案有了，授权才有对象可写。
+    say("  → 等 DNS 节点的成员档案出现…")
 
     # join 会触发一次 config 请求，controller 据此建立成员档案。
     for _ in range(30):
@@ -566,6 +583,37 @@ def setup_dns_member(zt, nwid, dns_ip, name="dns", quiet=False):
         "name": name,
     })
     return addr
+
+
+def dns_node_address():
+    """读 ztio-dns 容器的节点地址。
+
+    为什么不能再用 zt.status()["address"]：
+    那读的是 planet 自己的地址。DNS 是**另一个容器、另一个身份** ——
+    成员记录和 dns.servers 里要填的是 DNS 节点的地址，不是 planet 的。
+    填错了的症状是：成员记录看着正常，但那个地址永远不会有节点来认领。
+
+    地址由 ztio-dns 的 entrypoint 写到共享文件（跨容器 exec 很别扭，
+    而且从 planet 容器里 exec 另一个容器需要 docker socket —— 权限太大）。
+    """
+    import os
+    root = os.environ.get("ZTIO_DATA_ROOT", "/var/lib/ztio")
+    for path in (os.path.join(root, "run", "dns-node-address"),
+                 "/run/ztio/dns-node-address"):
+        try:
+            with open(path) as f:
+                a = f.read().strip()
+            if a:
+                return a
+        except OSError:
+            continue
+    raise Invalid(
+        "读不到 ztio-dns 的节点地址（找不到 dns-node-address 文件）。\n"
+        "    这个文件由 ztio-dns 容器启动时写入。先把它起来：\n"
+        "      docker compose up -d ztio-dns\n"
+        "      docker compose exec ztio-dns zerotier-cli info\n"
+        "    文件位置：<ZTIO_DATA_ROOT>/run/dns-node-address"
+    )
 
 
 def validate(payload, baseline):
