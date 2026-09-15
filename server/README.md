@@ -589,3 +589,35 @@ $EDITOR docker-compose.yml     # 3) 同步 ZT_VERSION 与 image 标签
 
 > 注意：1.14.2 是**最后一个** controller 仍在 `controller/`、受 BSL 覆盖的版本。
 > 1.16.0 起 controller 移入 `nonfree/`，改为仅限非商业 —— 所以不追新。
+
+### 成员对象支持 `name` 字段（实测确认）
+
+ZeroTier 的成员对象**有名字这个概念**，可以直接写：
+
+```bash
+docker compose exec ztplanet member.py set <nwid> <ztaddr> --name macbook
+```
+
+实测（1.14.2 controller）：写入 `{"name":"macbook","description":"test","hostname":"mbp"}`，
+回读后 **只有 `name` 留下**（revision 7 → 8），`description` / `hostname` 被丢弃。
+
+说明 `name` 不是"任意字段透传"，而是 controller 认识的字段。
+
+**这件事的意义**：成员的名字和地址可以存在同一个地方（controller），
+DNS 记录因此能完全派生出来，不需要第二份数据 —— 名字和地址不可能漂移。
+
+### ⚠️ 局部更新必须合并，不能替换
+
+`build_payload` 曾经对 `dns` 这样写：
+
+```python
+dns = {"servers": []}        # 从空对象起手
+dns["domain"] = args.dns_domain
+p["dns"] = dns               # 整个替换
+```
+
+后果：`set --dns-domain foo` 会**顺手把已有的 servers 清成 `[]`**。
+而且**回读比对发现不了** —— 它只检查你写入的键，不会发现你没写的键被抹掉。
+
+`dns` / `v4AssignMode` / `v6AssignMode` 都是对象，三个都已改为从当前状态合并。
+教训：**只给一个子字段时必须先读现状**，这让 `cmd_set` 里的读取顺序变成了硬要求。

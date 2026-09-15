@@ -283,7 +283,7 @@ def parse_route(s):
     return r
 
 
-def build_payload(args):
+def build_payload(args, before=None):
     """只把用户显式给出的字段放进 payload —— 其余字段保持 controller 上的原值。"""
     p = {}
 
@@ -304,22 +304,30 @@ def build_payload(args):
     if args.pool:
         p["ipAssignmentPools"] = [parse_pool(x) for x in args.pool]
 
+    # dns / v4AssignMode / v6AssignMode 都是**对象**，必须合并而不是替换。
+    # 曾经这里是 `dns = {"servers": []}` 起手，于是 `set --dns-domain foo` 会
+    # 顺手把已有的 servers 清成 [] —— 而回读比对只检查写入的键，发现不了。
+    # 局部更新抹掉同级字段，是这类脚本最容易出的错。
     if args.dns_domain is not None or args.dns_server:
-        dns = {"servers": []}
+        cur = (before or {}).get("dns")
+        dns = dict(cur) if isinstance(cur, dict) else {}
         if args.dns_domain is not None:
             dns["domain"] = args.dns_domain
-        for s in args.dns_server or []:
-            want_ip(s, "--dns-server")
-            dns["servers"].append(s)
+        if args.dns_server:
+            servers = []
+            for s in args.dns_server:
+                want_ip(s, "--dns-server")
+                servers.append(s)
+            dns["servers"] = servers
         p["dns"] = dns
 
     if args.route:
         p["routes"] = [parse_route(x) for x in args.route]
 
-    v4 = {}
     if args.v4_zt is not None:
+        cur = (before or {}).get("v4AssignMode")
+        v4 = dict(cur) if isinstance(cur, dict) else {}
         v4["zt"] = args.v4_zt
-    if v4:
         p["v4AssignMode"] = v4
 
     v6 = {}
@@ -330,7 +338,10 @@ def build_payload(args):
     if args.v6_zt is not None:
         v6["zt"] = args.v6_zt
     if v6:
-        p["v6AssignMode"] = v6
+        cur = (before or {}).get("v6AssignMode")
+        merged = dict(cur) if isinstance(cur, dict) else {}
+        merged.update(v6)
+        p["v6AssignMode"] = merged
 
     if args.capability:
         p["capabilities"] = [want_int(c, "--capability", 0, 2 ** 32 - 1) for c in args.capability]
@@ -369,6 +380,87 @@ def _pool_route_hint(pool):
         return None
     net = ipaddress.ip_network("%s/24" % s, strict=False)
     return str(net) if e in net else None
+
+
+def _iter_network_ids(zt):
+    """把 list_networks() 的返回值统一成 nwid 列表。
+
+    不同版本/不同接口返回结构不一致：可能是 ["nwid1", ...]、
+    也可能是 {"nwid1": revision, ...}、或者 [{"id": "nwid1"}, ...]。
+    别假设 —— 这个坑在这个仓库里已经踩过两次了。
+    """
+    raw = zt.list_networks()
+    if isinstance(raw, dict):
+        return [k for k in raw.keys() if k]
+    out = []
+    for x in (raw or []):
+        if isinstance(x, str):
+            out.append(x)
+        elif isinstance(x, dict):
+            v = x.get("id") or x.get("nwid")
+            if v:
+                out.append(v)
+    return out
+
+
+def dns_root(domain):
+    """取「主域名」—— 域名最后两段。
+
+        a1b2.ztio.internal  ->  ztio.internal
+        ztio.internal       ->  ztio.internal
+        internal            ->  internal
+    """
+    d = (domain or "").strip().rstrip(".").lower()
+    if not d:
+        return None
+    parts = d.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else d
+
+
+def check_dns_root_unique(zt, nwid, payload):
+    """不同网络的主域名不能相同。
+
+    为什么必须拦：一台设备可以同时在多个网络里，每个网络都会把自己的
+    dns.domain 下发成它的 search domain。两个网络主域名相同时，敲一个
+    短名（比如 `ping nas`）客户端会**两边都试**，最后答哪个取决于谁先回 ——
+    随机的、静默的、查不出来的错。
+
+    注意这是「主域名」不是「完整域名」：a.foo.internal 和 b.foo.internal
+    主域名都是 foo.internal，同样要拒绝。
+    """
+    dns = payload.get("dns")
+    if not isinstance(dns, dict):
+        return
+    domain = dns.get("domain")
+    if not domain:
+        return
+    root = dns_root(domain)
+    if not root:
+        return
+
+    # 注意 list_networks() 返回的是 **nwid 字符串列表**（不是网络对象），
+    # 要拿 dns.domain 必须逐个 get()。不同版本的 API 返回结构不一样，
+    # 这里统一处理，别假设。
+    for other in _iter_network_ids(zt):
+        if other == nwid:
+            continue
+        try:
+            n = zt.get(other)
+        except SystemExit:
+            continue
+        od = (n.get("dns") or {}).get("domain")
+        if not od:
+            continue
+        if dns_root(od) == root:
+            raise Invalid(
+                "主域名已被占用：%s\n"
+                "    网络 %s（%s）已经把它用作 %s 的主域名。\n"
+                "    不同网络的主域名必须不同 —— 一台同时在两个网络里的设备会拿到\n"
+                "    两个 search domain，敲短名时两边都试，答哪个取决于谁先回。\n"
+                "    这个错误没有任何报错，只会「有时候解析到错的 IP」。\n"
+                "    请换一个与 %s 无关的主域名。"
+                % (root, other, n.get("name") or "(无名)", od, root)
+            )
 
 
 def validate(payload, baseline):
@@ -457,6 +549,7 @@ def diff(target, actual, path=""):
 def write_verified(zt, nwid, payload, dry_run=False):
     before = zt.get(nwid)
     validate(payload, before)          # ← 请求之前
+    check_dns_root_unique(zt, nwid, payload)   # ← 主域名跨网络唯一
 
     if dry_run:
         print("将要 POST 到 /controller/network/%s：" % nwid)
@@ -577,10 +670,10 @@ def cmd_create(zt, args):
 
 def cmd_set(zt, args):
     nwid = need_nwid(zt, args.nwid)
-    payload = build_payload(args)
+    before = zt.get(nwid)              # ← 必须先读：build_payload 靠它做合并
+    payload = build_payload(args, before)
     if not payload:
         raise SystemExit("FATAL: 没有给出任何要修改的字段。用 --help 看选项。")
-    before = zt.get(nwid)
     print("网络            : %s（%s，revision %s）"
           % (nwid, before.get("name"), before.get("revision")))
     print("将要修改        : %s" % ", ".join(sorted(payload)))
