@@ -116,6 +116,9 @@ services:
       ZTIO_NWID: "${ZTIO_NWID:-}"
       # 9993 已被 planet 占用（host 网络），这里必须换一个。
       ZTIO_DNS_ZT_PORT: "9994"
+      # 重读记录的间隔（秒）。DNS 是长驻进程，而成员名 / 新设备入网 /
+      # 取消授权都会写进 controller 的落盘数据 —— 不重读就得重启容器。
+      ZTIO_DNS_REFRESH: "30"
 
     volumes:
       # 自己的身份和数据目录，与 planet 完全分开。
@@ -128,8 +131,9 @@ services:
       # 节点地址写在这里，供控制面脚本读取（跨容器 exec 很别扭）。
       - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/run:/run/ztio
 
-    # 必须发布，否则节点只能走 relay —— 而 DNS 在每次名字解析的关键路径上，
-    # 绕中继意味着每次查询都多一跳公网延迟。
+    # 发布到宿主机，对端才可能直连（还要安全组放行 9994 —— 缺一不可）。
+    # 不放行 = 走 planet 中继：DNS 照常可用，因为 planet 与这个容器同机，
+    # 多出来的一跳是本地环回。本部署就是这么跑的，见 README「ztio-dns」一节。
     ports:
       - "9994:9994/udp"
 

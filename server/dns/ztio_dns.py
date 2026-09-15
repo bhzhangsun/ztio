@@ -17,6 +17,8 @@
    成员的名字（name）和地址（ipAssignments）都在 controller 里，DNS 只是
    把它们翻译成 <name>.<zone> → <ip>。名字和地址因此不可能漂移。
    这也解释了为什么不需要数据库。
+   派生是**持续的**：每 --refresh 秒重读一次，变了才换表。只在启动时读一次
+   的话，加一台设备就得重启容器 —— 那很容易被当成「DNS 坏了」。
 
 4. 报文解析交给 dnslib
    要写的是「静态表 + 隔离策略」，不是 DNS 协议栈。压缩指针、EDNS0、
@@ -35,6 +37,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import signal
 import socket
 import socketserver
@@ -83,6 +86,15 @@ def list_networks(ctr_dir):
             d.setdefault("id", n[:-5])
             out.append(d)
     return out
+
+
+def find_network(ctr_dir, nwid):
+    """按 nwid 精确读一个网络定义（刷新时用，比 list_networks 少读别的网络）。"""
+    d = load_json(os.path.join(ctr_dir, nwid + ".json"))
+    if isinstance(d, dict):
+        d.setdefault("id", nwid)
+        return d
+    return None
 
 
 def load_members(ctr_dir, nwid):
@@ -146,6 +158,19 @@ class Zone(object):
             self.nwid, self.zone, self.address, len(self.records))
 
 
+class ZoneState(object):
+    """**当前生效的** zone 的持有者。
+
+    刷新线程与应答线程并发访问，所以切换必须是一次**原子赋值**：CPython 里
+    给属性赋一个新引用是原子的，于是应答线程要么看到旧表、要么看到新表，
+    永远看不到"改了一半"的表。这也意味着 Zone 本身必须当**不可变对象**用 ——
+    只换引用，绝不原地改 records。
+    """
+
+    def __init__(self, zone):
+        self.zone = zone
+
+
 def build_zone(ctr_dir, net, nwid):
     zone = (net.get("dns") or {}).get("domain")
     if not zone:
@@ -176,7 +201,10 @@ def build_zone(ctr_dir, net, nwid):
         if not ips:
             continue
         name = (m.get("name") or "").strip().lower()
-        if name:
+        # 防御性过滤：名字会原样变成 DNS 标签。正常路径上 member.py name 已经
+        # 校验过字符集，但直接写 API 可以绕过它 —— 那种名字只会生成一条永远
+        # 匹配不到的记录，不如在这里就丢掉。
+        if name and re.match(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", name):
             records["%s.%s" % (name, zone)] = ips
         records["%s.%s" % (addr.lower(), zone)] = ips
 
@@ -192,10 +220,12 @@ class Responder(object):
 
     刻意不叫 Handler —— socketserver 里 Handler 指的是"处理请求的那个类"，
     两者是不同层次的东西，同名会让下面的传参错误看起来是对的。
+
+    它不直接持有 Zone，而是持有 ZoneState：记录会被刷新线程换掉。
     """
 
-    def __init__(self, zone):
-        self.zone = zone
+    def __init__(self, state):
+        self.state = state
 
     def answer(self, data):
         try:
@@ -208,12 +238,20 @@ class Responder(object):
         qtype = q.qtype
         reply = req.reply()
 
+        # AD（Authentic Data）位必须清掉，**所有**返回路径都要。dnslib 的
+        # reply() 会原样复制问题段的 bitmap，而 dig / macOS 默认就带 AD 位 ——
+        # 于是不校验 DNSSEC 的我们会回一个「这些数据已通过 DNSSEC 验证」的
+        # 假信号（实测确实如此）。放在这里而不是各 return 之前，就是因为
+        # 漏一条路径就会漏一个假信号。
+        reply.header.ad = 0
+
         # 大小写：DNS 名字不区分大小写，但有些客户端会随机化大小写
         # （0x20 编码）并期望响应里原样回显。dnslib 的 reply() 用问题段的
         # 原始 qname，所以这里只做查找侧的小写化。
-        ips = self.zone.lookup(qname)
+        ips = self.state.zone.lookup(qname)
 
         if ips is None:
+            # 名字本身不在 zone 里 —— 这才是 NXDOMAIN 的正确用法。
             reply.header.rcode = RCODE.NXDOMAIN
             return reply.pack()
 
@@ -224,18 +262,17 @@ class Responder(object):
                         reply.add_answer(RR(qname, QTYPE.A, rdata=A(ip), ttl=60))
                 except ValueError:
                     continue
-        elif qtype == QTYPE.AAAA:
-            # v1 只做 IPv4。ZeroTier 的 RFC4193 地址是从节点地址派生的，
-            # 这里暂时不生成 —— 缺了它只会让 AAAA 查询返回空，不影响 A。
-            pass
-        elif qtype in (QTYPE.NS, QTYPE.SOA):
-            pass
-        else:
-            reply.header.rcode = RCODE.NXDOMAIN
-            return reply.pack()
 
-        if not reply.rr:
-            reply.header.rcode = RCODE.NXDOMAIN
+        # 名字存在、但这个类型没有数据（AAAA / NS / SOA / TXT…）→ NOERROR
+        # 加空答案，即 NODATA。
+        #
+        # 这里**不能**回 NXDOMAIN：RFC 2308 里 NXDOMAIN 是「这个名字不存在」
+        # 级别，负缓存是按**名字**而不是按类型生效的 —— 严格的客户端会把
+        # macbook.ztio.internal 整个缓存成"不存在"，连累紧随其后的 A 查询。
+        # 而 macOS 恰恰是 A 和 AAAA 一起发的。
+        #
+        # AAAA 目前一条都不发（ZeroTier 的 RFC4193 地址由节点地址派生，
+        # v1 不生成），所以 AAAA 查询就落在这条 NODATA 路径上。
         return reply.pack()
 
 
@@ -309,6 +346,48 @@ def bind_with_retry(server_cls, addr, responder, deadline):
 # 主流程
 # ----------------------------------------------------------------------
 
+def refresh_loop(state, ctr_dir, nwid, interval, stop):
+    """按 interval 秒重读 controller 数据，**变了才换表**。
+
+    为什么不能只在启动时建一次表：成员名、新设备入网、取消授权，全都写在
+    controller 的落盘数据里，而 DNS 是长驻进程。不重读的话，加一台设备就得
+    重启容器 —— 而这很容易被当成「DNS 坏了」。
+
+    三条纪律：
+      - 没变化就不吭声。30 秒一条日志会把真正有用的信息淹掉。
+      - 任何时候出错都用旧表继续服务。DNS 挂了比记录略旧严重得多。
+      - 地址变了只报警不重绑：重新 bind 要动 socketserver 的生命周期，
+        而这件事（改动网段/DNS 地址）几乎不会发生，报出来让人重启更划算。
+    """
+    while not stop.wait(interval):
+        try:
+            net = find_network(ctr_dir, nwid)
+            if net is None:
+                continue                     # 网络被删了：保留旧表，等它回来
+            z = build_zone(ctr_dir, net, nwid)
+            if z is None:
+                continue
+
+            old = state.zone
+            if z.address != old.address:
+                log(
+                    "⚠️ DNS 地址 %s → %s：监听仍绑在旧地址上，请重启容器"
+                    % (old.address, z.address)
+                )
+                continue
+            if z.records == old.records:
+                continue
+
+            for k in sorted(set(z.records) - set(old.records)):
+                log("  + %s → %s" % (k, ",".join(z.records[k])))
+            for k in sorted(set(old.records) - set(z.records)):
+                log("  - %s" % k)
+            state.zone = z
+            log("记录已更新：%d 条 → %d 条" % (len(old.records), len(z.records)))
+        except Exception as e:               # 守护线程里绝不能把异常抛出去
+            log("重读记录失败（继续用旧表）：%s" % e)
+
+
 def main():
     ap = argparse.ArgumentParser(description="ztio static DNS for ZeroTier")
     ap.add_argument("--ctr", default="/ctr", help="controller.d/network 的挂载点")
@@ -344,19 +423,33 @@ def main():
     deadline = time.time() + args.bind_timeout
     servers = []
     for z in zones:
-        r = Responder(z)
+        state = ZoneState(z)
+        r = Responder(state)
         u = bind_with_retry(UDPServer, (z.address, 53), r, deadline)
         t = bind_with_retry(TCPServer, (z.address, 53), r, deadline)
-        servers.append((z, u, t))
+        servers.append((state, u, t))
         log("已监听 %s:53 (UDP+TCP)  zone %s" % (z.address, z.zone))
 
     for _, u, t in servers:
         threading.Thread(target=u.serve_forever, daemon=True).start()
         threading.Thread(target=t.serve_forever, daemon=True).start()
 
-    log("就绪。本进程只答自己 zone 里的记录，其余 NXDOMAIN，不做递归。")
-
     stop = threading.Event()
+
+    # ---- 记录刷新 ----
+    # 一个网络一个刷新线程；用 stop.wait(interval) 阻塞，所以收到信号能立刻退出。
+    for state, _, _ in servers:
+        threading.Thread(
+            target=refresh_loop,
+            args=(state, args.ctr, state.zone.nwid, args.refresh, stop),
+            daemon=True,
+        ).start()
+
+    log(
+        "就绪。只答自己 zone 里的记录，其余 NXDOMAIN，不做递归。"
+        "每 %d 秒重读一次 controller 数据。" % args.refresh
+    )
+
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     try:

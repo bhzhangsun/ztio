@@ -145,7 +145,10 @@ fi
 #
 # 参数：
 #   --ctr      controller.d/network 的只读挂载点，记录来源
+#   --refresh  重读记录的间隔（秒）。加设备 / 改名字 / 取消授权都会写进
+#              controller 的落盘数据，DNS 长驻 —— 不重读就得重启容器。
 #   --run-dir  共享目录（节点地址文件）
 exec python3 /usr/local/bin/ztio_dns.py \
     --ctr "$CTR_DIR" \
-    --nwid "$NWID"
+    --nwid "$NWID" \
+    --refresh "${ZTIO_DNS_REFRESH:-30}"
