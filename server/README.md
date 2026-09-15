@@ -1,13 +1,20 @@
-# server —— 自建 ZeroTier planet + controller
+# server —— 自建 ZeroTier planet + controller（+ 网段内的 DNS）
 
-这台机器做两件事：
+这台机器上跑三类容器：
 
-| 角色 | 作用 |
-|---|---|
-| **planet（root）** | ZeroTier 的根服务器。所有节点靠它互相找到对方、协助打洞、必要时中继 |
-| **controller** | 网络定义、成员授权、地址分配。你的网络不再依赖 ZeroTier Central |
+| 角色 | 作用 | 在网络里吗 |
+|---|---|---|
+| **planet（root）** | ZeroTier 的根服务器。所有节点靠它互相找到对方、协助打洞、必要时中继 | ❌ 不在 |
+| **controller** | 网络定义、成员授权、地址分配。你的网络不再依赖 ZeroTier Central | ❌ 不在 |
+| **ztio-dns** | 网段内的静态 DNS，占网段第一个 IP | ✅ 在（叶子节点，见下面「ztio-dns」一节） |
 
-它**自己不加入任何网络** —— 所以不需要虚拟网卡、不需要 `NET_ADMIN`、不需要 `/dev/net/tun`。
+**planet + controller 自己不加入任何网络** —— 所以那两个不需要虚拟网卡、
+不需要 `NET_ADMIN`、不需要 `/dev/net/tun`。这条边界是刻意守住的：
+planet 持有全网签名私钥，不该同时拥有「改网络」的能力。
+
+**ztio-dns 是例外，而且必须是例外**：客户端要往一个 IP 发 UDP 包，那个 IP 就得
+映射到「和客户端同在一个网络里的成员」—— 所以它要 `/dev/net/tun` 和 `NET_ADMIN`。
+为了不让这份权限沾到 planet，它是一个**独立容器、独立身份**。
 
 ---
 
@@ -19,12 +26,14 @@
 |---|---|---|
 | **公网 IP** | 必须有 | root 的地址要写进 planet，所有节点靠它互相找到。**这是唯一需要你提供的信息** |
 | Docker | 20.10+ | 需要 `docker compose` 插件（`docker compose version` 能跑） |
-| 入站端口 | **UDP 9993** | 唯一需要开放的端口。TCP 9993 是本地管理 API，**不要**对外 |
+| 入站端口 | **UDP 9993**<br>UDP 9994（可选） | 9993 必须开放，不放行设备之间永远找不到彼此。9994 是 ztio-dns 容器**自己的**节点端口（本机第二个 ZeroTier 节点）：不放行它 DNS 照常可用 —— 那个成员与其它成员之间走 planet 中继，而 planet 与它同机，多出来的一跳是本地环回。**本部署选择不放行**（中继模式），见下面「ztio-dns」一节。TCP 9993 是本地管理 API，**不要**对外 |
 | 内存 | 512 MB 够 | 实测在 1.6 GB / 2 vCPU 的机器上构建 + 运行无压力 |
 | 磁盘 | 1 GB 够 | 镜像 112 MB + 数据几百 KB |
 
-**不需要** `/dev/net/tun`、`NET_ADMIN`、`SYS_ADMIN`、`--privileged`。
-这台机器**不加入任何网络** —— 它只是根服务器和控制器，不承载业务流量。
+**planet + controller 不需要** `/dev/net/tun`、`NET_ADMIN`、`SYS_ADMIN`、`--privileged` ——
+那两个容器不加入任何网络，不承载业务流量。
+（**ztio-dns 需要** `/dev/net/tun` 与 `NET_ADMIN`，但它是一个独立容器，
+那份权限被关在它自己的网络命名空间里，够不到宿主机。）
 
 ### 三步部署
 
@@ -191,10 +200,9 @@ scp root@<服务器>:/var/lib/ztio/dist/planet  ./planet
 ### 日常操作
 
 ```bash
-```bash
 docker compose logs -f                        # 看日志
 docker compose restart                        # 重启（不会重新生成 planet）
-docker compose down && docker compose up -d   # 重建容器，数据在 data/ 里不受影响
+docker compose down && docker compose up -d   # 重建容器；数据在 ${ZTIO_DATA_ROOT} 里，不受影响
 ./scripts/backup.sh                           # 备份密钥与控制器状态
 docker compose exec ztplanet member.py list   # 成员状态
 ```
@@ -210,6 +218,119 @@ docker compose exec ztplanet member.py list   # 成员状态
 
 ---
 
+## ztio-dns：网络内部的 DNS
+
+网络里的客户端要解析 `名字.ztio.internal`，就得有个 DNS 服务器**在网段里** ——
+ZeroTier 里一个 IP 要可达，必须映射到「与客户端同在一个网络的成员」。
+`ztio-dns` 容器就是干这个的：它是一个普通的叶子节点，占网段第一个 IP，在 53 端口应答。
+
+```
+客户端 ──UDP 53──→ 172.16.0.1（ztio-dns 容器）
+                     ├── 只答自己 zone 内的记录，其余 NXDOMAIN，不做递归
+                     └── 记录从 controller 落盘数据派生（name + ipAssignments），不存第二份
+```
+
+四条设计约束，理由写在 [`dns/Dockerfile`](dns/Dockerfile) 顶部：
+
+| 约束 | 理由 |
+|---|---|
+| 静态、不做递归 | 公网主机上跑递归 DNS 是放大攻击的帮凶 |
+| 绑 ZT 接口地址，绝不绑 `0.0.0.0` | 这是「只对网络内可见」的全部支点 |
+| 记录从 controller 数据派生，不存第二份 | 名字与地址不可能漂移，因此不需要数据库 |
+| 只读挂载 `/ctr`，**不给** authtoken | 为读几条记录交出全机最高权限凭据，是把最小权限倒过来用 |
+
+**为什么是独立容器**：planet 持有全网签名私钥，泄露等于把所有设备指向攻击者的根 ——
+它是最不该同时拥有「改网络」能力的组件。而 DNS 必须建虚拟网卡（要 `NET_ADMIN`），
+所以拆出来，让那份权限只落在容器自己的网络命名空间里。
+
+### 部署顺序
+
+有先后依赖，按这个顺序做：
+
+```bash
+# 1. 起编排。DNS 容器此时还没有网络可加入 —— 正常，它会在日志里说明
+./scripts/deploy.sh
+
+# 2. 建网络。create 会**顺手尝试**装配 DNS
+docker compose exec ztplanet ztnet.py create --name homenet --private --mtu 2800 \
+    --pool 172.16.0.100-172.16.0.200 --route 172.16.0.0/24 \
+    --dns-domain ztio.internal
+#    → 记下打印出来的 nwid
+
+# 3. 把 nwid 写进 .env，让 DNS 容器加入网络
+$EDITOR .env                       # ZTIO_NWID=<上一步的 nwid>
+docker compose up -d ztio-dns
+
+# 4. 补装 DNS：授权 DNS 成员、固定到网段第一个 IP、下发 dns.servers
+docker compose exec ztplanet ztnet.py dns-setup <nwid> --domain ztio.internal
+```
+
+第 2 步一次装不成是**预期行为**，不是错误：装配要等 DNS 节点向 controller
+请求过配置、成员档案出现之后才有对象可授权，而那时它还没入网。
+所以 `create` 把 DNS 装配放在回滚路径之外 —— 「网络可用但没有名字解析」
+不该把整个网络删掉。
+
+客户端侧还要各自打开，**ZeroTier 默认不接管 DNS**：
+
+```bash
+sudo zerotier-cli set <nwid> allowDNS=1      # macOS / Linux
+```
+
+### 排障：为什么这个成员永远是 `RELAY`
+
+```bash
+docker compose exec ztio-dns zerotier-cli peers
+```
+
+别的成员显示 `RELAY`、延迟 `-1`，表示两端**打不成直连**，流量绕 planet 中转。
+
+> **先说结论：没放行 UDP 9994 时，`RELAY` 就是预期状态，不是故障。**
+> 本部署就是这么跑的。下面的排查只在「你想让它变成直连」时才需要。
+
+想确认中继本身是好的：DNS 查询答得出来就说明是好的。然后才查这一条：
+
+**安全组放行了 UDP 9994 吗？** 这是 ztio-dns 节点对外的唯一端口，
+没放行时它宣告的端点（`<公网 IP>:9994`）从公网根本进不来：
+
+- 容器里的 `local.conf` 关掉了 secondary / tertiary 端口，它只有这一个口
+- 它**不知道自己被挡在门外** —— `info -j` 的 `surfaceAddresses` 照常写着
+  `<公网 IP>/9994`，于是照样把这个地址推给对端
+- 对端拿着这个地址打洞，探测有去无回，于是把它当死路径，退回中继
+
+> 实测（2026-09-15）：客户端往 9993 打的裸 UDP 包**全部到达**，
+> 往 9994 打的**一个都没到**；同时宿主机上那条
+> `udp dport 9994 -j DNAT` 的计数是 **0**。
+> 包在阿里云的虚拟化层就被丢了，**连宿主机网卡都没到** ——
+> 所以「宿主机抓不到」不等于「客户端没发」，这条最容易被误判成客户端的问题。
+
+验证方法（客户端打裸 UDP，服务器同时抓包，9993 作对照）：
+
+```bash
+# 客户端
+python3 - <<'EOF'
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for i in range(5):
+    s.sendto(b'PROBE-%d' % i, ('<服务器公网 IP>', 9994)); time.sleep(0.5)
+EOF
+
+# 服务器
+sudo tcpdump -i eth0 -n "udp and (port 9993 or port 9994) and src host <客户端公网 IP>"
+```
+
+放行后两个端口都该出现；只有 9993 出现就是 9994 没放行。
+
+> 补充：**DNS 走中继的代价其实很小** —— planet 与 DNS 容器在同一台机器上，
+> 中继多出来的那一跳是本地环回，不增加公网延迟（实测查询 40–90 ms，
+> 与客户端到服务器的 RTT 同量级）。所以「不放行 9994」不等于 DNS 不能用，
+> 而是①依赖 planet 活着，②这条路径永远不会自愈成直连。
+>
+> **本部署的选择：不放行 9994，走中继。** 理由就是上面这条 —— 代价小到不值得
+> 为它多开一个公网入站端口；而 DNS 本来就强依赖 planet（planet 挂了全网都没了，
+> 不只是 DNS）。哪天需要直连，再补那条安全组规则即可，代码不用动。
+
+---
+
 ## 目录
 
 ```
@@ -220,6 +341,10 @@ server/
 ├── entrypoint.sh               生成 identity / planet / local.conf
 ├── patches/
 │   └── mkworld-env.py          把 mkworld 的硬编码 root 改成读环境变量
+├── dns/                        ztio-dns：网络内部的 DNS（见上）
+│   ├── Dockerfile              同一个 ZeroTier 1.14.2（同哈希）+ dnslib
+│   ├── entrypoint.sh           装我们的 planet / 换到 9994 / 加入网络 / 起 DNS
+│   └── ztio_dns.py             DNS 服务本体
 └── scripts/
     ├── deploy.sh               构建 + 启动 + 验证 planet
     ├── ztnet.py                网络的增删改查，请求前校验 + 写后回读比对
@@ -539,10 +664,16 @@ shasum -a 256 ztio-*.tar.gz     # 与服务器上的 sha256sum 比对
 
 | 端口 | 用途 | 是否对公网开放 |
 |---|---|---|
-| UDP 9993 | ZeroTier 线协议 | ✅ **唯一需要放行的** |
+| UDP 9993 | planet 的 ZeroTier 线协议 | ✅ **必须放行** —— 不放行设备之间找不到彼此 |
+| UDP 9994 | ztio-dns **自己的**节点端口（本机第二个 ZeroTier 节点） | ⭕ **可选**。不放行 = 那个成员走中继；DNS 照常可用。**本部署未放行** |
 | TCP 9993 | 管理 API | ❌ 绑在 `0.0.0.0`（host 网络所致），由应用层 `allowManagementFrom` 限制为仅本机 |
 
-安全组只需要一条入站规则：**UDP 9993**。
+安全组入站规则：**UDP 9993 必须**，**UDP 9994 可选**。
+
+⚠️ **不放行 9994 时，症状极具迷惑性**：容器好好的、节点 `ONLINE`、DNS 查询也答得出来，
+`ping 172.16.0.1` 通 —— 只有 `zerotier-cli peers` 里那个成员永远显示 `RELAY`。
+因为包丢在**安全组**（阿里云的虚拟化层），宿主机网卡上抓不到任何痕迹，
+所以「宿主机抓不到 ≠ 客户端没发」。实测证据与验证方法见下面「ztio-dns」一节。
 
 因为用了 `network_mode: host`，TCP 9993 会绑到 `0.0.0.0`。ZeroTier 在应用层拒绝非本机请求
 （`service/OneService.cpp:1742` 按源地址过滤），但如果主机的 `iptables -P INPUT` 是 `ACCEPT`
@@ -584,8 +715,9 @@ $EDITOR docker-compose.yml     # 3) 同步 ZT_VERSION 与 image 标签
 
 升级后 `zerotier-cli` / 管理 API 的字段可能有变化，`ztnet.py` 的回读比对会发现。
 
-`data/` 里的东西（identity、planet 签名密钥、controller 定义的网络）不受影响，
-`docker compose down && up -d` 也不会动它们 —— 所以降级同样安全。
+`${ZTIO_DATA_ROOT}`（默认 `/var/lib/ztio`，**在仓库外**）里的东西 —— identity、
+planet 签名密钥、controller 定义的网络 —— 不受影响，
+`docker compose down && up -d` 也不会动它们，所以降级同样安全。
 
 > 注意：1.14.2 是**最后一个** controller 仍在 `controller/`、受 BSL 覆盖的版本。
 > 1.16.0 起 controller 移入 `nonfree/`，改为仅限非商业 —— 所以不追新。

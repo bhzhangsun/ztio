@@ -196,6 +196,7 @@ echo
 echo " 客户端接入：把 $DIST_DIR/planet 覆盖到设备的 ZeroTier 数据目录，"
 echo " 然后校验 md5 必须是 $FINGERPRINT"
 echo
-echo " 安全组只需放行：UDP $ZT_PORT 入站"
+echo " 安全组放行：UDP $ZT_PORT 入站（必须）"
+echo "             UDP 9994 入站（用 ztio-dns 时。不放行 DNS 也能用，但只能走中继）"
 echo " 确认**没有**放行：TCP 9993 / 3443 / 3000"
 echo "════════════════════════════════════════════════════════"

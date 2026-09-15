@@ -28,10 +28,10 @@
 ztio/
 ├── docs/
 │   └── exit-proxy.md          ★ 出口代理设计 —— 唯一的核心文档
-├── server/                    自建 planet + controller
+├── server/                    自建 planet + controller + 网段内的 DNS
 │   ├── Dockerfile             固定 ZeroTier 1.14.2，用预编译包（不编译源码）
+│   ├── dns/                   ztio-dns：独立容器、独立身份的静态 DNS
 │   ├── scripts/               deploy / ztnet（网络增删改查）/ member / backup
-│   ├── data/                  controller 状态与 planet（不进 git，backup.sh 覆盖）
 │   └── README.md
 ├── app/                       Flutter 客户端
 │   ├── README.md              代理引擎的分层与两个角色
@@ -44,7 +44,7 @@ ztio/
 
 | 部分 | 是什么 | 技术 |
 |---|---|---|
-| **server** | 自建 Planet + Controller，取代 ZeroTier Central | Docker / Shell / Python |
+| **server** | 自建 Planet + Controller，取代 ZeroTier Central；外加网段内的 DNS | Docker / Shell / Python |
 | **app** | Flutter 工程：`ztio` plugin + 三端应用（macOS 为状态栏应用） | Dart + Swift / Kotlin |
 
 ---

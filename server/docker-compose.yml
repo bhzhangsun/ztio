@@ -4,7 +4,14 @@
 #   cp .env.example .env      # 填 ZTIO_PUBLIC_IP4
 #   docker compose up -d --build
 #
-# 安全组只需要放行一条入站规则：UDP 9993。
+# 安全组入站规则：
+#   UDP 9993  —— 必须。planet 的线协议端口，不放行则全网设备互相找不到。
+#   UDP 9994  —— **可选**。这是 ztio-dns 容器自己的节点端口（它是这台机器上的
+#                第二个 ZeroTier 节点，9993 被 planet 占了）。
+#                不放行 = 那个成员与其它成员之间走 planet 中继：DNS 照常可用，
+#                因为 planet 与 DNS 容器在同一台机器上，多出来的一跳是本地环回。
+#                代价是①依赖 planet 活着 ②永远不自愈成直连。
+#                本部署选择不放行（中继模式）。见 README「ztio-dns」一节。
 # 不要放行 TCP 3443 / 3000 / 9993 —— 本编排不提供任何 HTTP 服务。
 
 services:
@@ -100,8 +107,13 @@ services:
     network_mode: bridge
 
     environment:
-      # 要加入的网络。留空则只启动节点不加入 —— DNS 会因此没有可服务的接口。
-      ZTIO_NWID: "${ZTIO_NWID:?必须设置 ZTIO_NWID（要服务的网络 ID）}"
+      # 要加入的网络。**建网之后**才填（.env 里那个 ZTIO_NWID）。
+      #
+      # 这里刻意不用 ${ZTIO_NWID:?...} 强制报错：网络是部署之后才创建的，
+      # 而 deploy.sh 会 `docker compose up -d` 整个编排 —— 强制报错会让
+      # **首次部署直接失败**（.env 从 .env.example 复制而来时它必然为空）。
+      # 留空时容器照常起来，只是不加入网络、没有可服务的接口，并在日志里说明。
+      ZTIO_NWID: "${ZTIO_NWID:-}"
       # 9993 已被 planet 占用（host 网络），这里必须换一个。
       ZTIO_DNS_ZT_PORT: "9994"
 
