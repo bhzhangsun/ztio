@@ -192,6 +192,42 @@ ZTS_API const zts_ip_addr* zts_dns_get_server(uint8_t index);
 | **A. libzt 内部能按名字连** | `zts_dns_set_server(0, <DNS 地址>)` | 间接（出口代理连对端时用） |
 | **B. 宿主机 app 能按名字访问** | 改系统 DNS：macOS/iOS `NEDNSSettings` + `matchDomains`；Android `VpnService` DNS | ✅ **这才是用户看到的那件事** |
 
+### ★ 为什么设 libzt 的 DNS 解决不了「在浏览器里用域名」
+
+**因为有两堵独立的墙，设 libzt 的 DNS 一堵都拆不掉。**
+
+```
+libzt 的路径：  libzt 内部 socket ──→ lwIP 的 resolver ──→ 172.16.0.1（走 ZT）
+浏览器的解析：  浏览器 ──→ 系统 resolver ──→ ?          ← libzt 不在这条路上
+浏览器的数据：  浏览器 ──→ 系统 TCP/IP 栈 ──→ ?          ← 宿主机没有到 172.16.0.0/24 的路由
+```
+
+| 墙 | 谁在挡 | 设 libzt DNS 能解决吗 |
+|---|---|---|
+| **① 名字解析** | 浏览器问的是**系统 resolver**（macOS `mDNSResponder` / Android `netd`），它不认识 libzt。`zts_dns_set_server()` 只改了 **lwIP 内部**那一个 DNS 客户端 | ❌ 不能 —— 浏览器**根本不会去问 libzt** |
+| **② 地址可达** | 浏览器拿到 `172.16.0.10` 后，用**自己的 socket** 调 `connect()`，走的是**宿主机 TCP/IP 栈**。而宿主机**没有到 `172.16.0.0/24` 的路由**（见 §2.7） | ❌ 不能 —— 名字对了也连不上 |
+
+**两条完全平行的路径：libzt 进程里发生的事，浏览器看不见。**
+
+### ★ 好消息是：解决 ② 会自动解决 ①（反过来不成立）
+
+这个不对称正是关键：
+
+| 只做这一件事 | 结果 |
+|---|---|
+| 只设 libzt 的 DNS | ❌ 浏览器无感，什么都没变 |
+| **只改系统 DNS 指向 `172.16.0.1`**（但没有 ZT 接口） | ⚠️ **更糟** —— 宿主机**没有到 `172.16.0.1` 的路由**，于是**所有**域名都解析不了，**整台设备断网** |
+| **建了系统 VPN 接口**（并带上 DNS 配置） | ✅ **两堵墙一起拆** —— 有接口就有路由（②），VPN 配置里带 `addDnsServer()` / `NEDNSSettings` 就让浏览器去问 `172.16.0.1`（①） |
+
+★ **所以「改系统 DNS」和「建系统接口」必须一起做，单独做任何一个都是错的。**
+第二行那种「帮倒忙」的失败方式尤其难查 —— 用户的原话会是「装了这个 app 我就上不了网了」。
+
+### 那 `zts_dns_set_server()` 到底还有没有用
+
+**在你的产品里可能根本用不上。** 出口代理那条路（[`../docs/exit-proxy.md`](../docs/exit-proxy.md)）
+是按 **IP 直连**对端的，不需要按名字解析。留着它只在「app 自己想按名字连某个成员」时有意义 ——
+那是可选增强，**不是 F1a**。
+
 ### ⚠️ 必须 split DNS，绝不能全局设
 
 DNS 服务器（`172.16.0.1`）**只在 ZT 网内可达**。设成全局 DNS 的后果：
@@ -251,7 +287,8 @@ struct zts_sockaddr_storage assigned_addrs[ZTS_MAX_ASSIGNED_ADDRESSES];
 
 ## 2.7 ⚠️ 一个会改变客户端形态的事实：libzt 是用户态 socket 库，不建系统网卡
 
-> **这一节的结论如果成立，「客户端要做成什么」会变。** 先看证据，再看后果。
+> **已从 libzt 源码核实（2026-09）。** 结论：「libzt 里的 ZT 地址，只有 libzt 自己的
+> socket 能访问」—— **浏览器拿不到。**
 
 ### 证据
 
@@ -259,9 +296,14 @@ struct zts_sockaddr_storage assigned_addrs[ZTS_MAX_ASSIGNED_ADDRESSES];
 |---|---|
 | libzt README 自述 | *"P2P cross-platform encrypted **sockets library** using ZeroTier"* |
 | 头文件里是**整套自己的 socket API** | `zts_bsd_socket` / `connect` / `bind` / `listen` / `accept` / `read` / `write` … —— **app 调的是这些，不是系统 `socket()`** |
-| 头文件里**没有**任何建网卡的 API | `zts_init_*` 一共 19 个，**没有一个**跟接口创建有关 |
-| `ZTS_EVENT_NETIF_*` | 注释写着 *(for debug purposes)* —— 那是 lwIP 内部的 netif，不是系统接口 |
-| **没有原始包注入接口** | 这条决定了能否与 `VpnService` / `NEPacketTunnelProvider` 对接 |
+| 头文件里**没有**建网卡的 API | `zts_init_*` 一共 19 个，**没有一个**跟接口创建有关 |
+| ★ **源码里唯一的「网卡」是 `src/VirtualTap.cpp`** | 它 `#include "lwip/netif.h"` / `lwip/tcpip.h`，用的是 `zts_lwip_init_interface()` / `zts_lwip_eth_rx()` / `zts_lwip_remove_netif()` —— **全是 lwIP 内部 API**。`VirtualTap` 是「lwIP 里的一块虚拟网卡」，**不是系统接口** |
+| ★ **`VirtualTap.cpp`（641 行）里没有一处 OS 设备操作** | 搜不到 `/dev/net/tun`、`TUNSETIFF`、`utun`、`open("/dev/…`、`IFF_TUN`、`CreateFile` —— **一个都没有** |
+| ★ **`src/` 一共 16 个文件，没有 osdep** | `Central.cpp` / `Controls.cpp` / `Events.*` / `NodeService.*` / `Signals.*` / `Sockets.cpp` / `Utilities.*` / `VirtualTap.*` / `lwipopts.h` —— **没有平台 tap 驱动** |
+| **没有原始包注入接口** | 决定了**无法**与 `VpnService` / `NEPacketTunnelProvider` 对接 |
+
+> 一句话：`VirtualTap` 这个名字容易误导 —— 它是**喂给 lwIP 的**虚拟网卡，
+> 让 lwIP 以为自己有块网卡；**它不会给宿主机操作系统加任何接口。**
 
 ### 后果
 
@@ -287,10 +329,14 @@ DNS 就算解析出来了，`172.16.0.10` 这个地址也没有人送得到。
 
 ★ **合起来看：移动端要兑现 F1a，只能走乙 —— 也就是自己写一个 ZeroTier 客户端。** 这不是小工程，得在排期里正视。
 
-> **这条必须先验证（§6 的 V8），它比 V1 更靠前。**
-> V1 决定「libzt 能不能用」，V8 决定「**客户端到底要做成什么形态**」。
-> 如果 V8 的结论如证据所示，那么 `platform.md` §4 那一整套「出站链路绑定」的讨论
-> 在系统 VPN 形态下会**完全不同** —— 因为那时流量已经走系统路由，绑定是另一套做法。
+> **官方移动端 app 之所以能做到，是因为它根本不是 libzt 写的** ——
+> 它有自己完整的 `VpnService` / `NEPacketTunnelProvider` 实现。
+> **libzt 和官方客户端是两份不同的东西**，别把后者的能力算到前者头上。
+
+> **这条决定「客户端做成什么形态」，排在 V1 前面。**
+> 如果走乙，`platform.md` §4 那一整套「出站链路绑定」的讨论要重写 ——
+> 系统 VPN 形态下流量已经走系统路由，绑定是另一套做法。
+> （仍需实测确认的只剩一点：libzt 在**桌面端**是否有未文档化的建接口行为。移动端则是平台硬约束，不可能。）
 
 ---
 
@@ -384,12 +430,15 @@ onNetworkChanged()         → stream
 | V5 | 移动端 libzt 是否支持 `local.conf` 的 `bind` | 中 | 实测 |
 | ~~V6~~ | ~~`zts_init_set_roots` 的 `roots_data` 是 planet 二进制还是 `zts_root_set_t`~~ | ✅ **已解答（读头文件）** | `zts_init_set_roots(const void* roots_data, unsigned int len)`，注释写明 **"(binary)"** → **就是 planet 原始字节**。只剩实测确认「World 文件原样喂进去」 |
 | **V7** | `ZTS_EVENT_STORE_NETWORK` 的 `cache` blob 是什么编码，能不能从里面取出 `dns.domain` | 中 | 抓事件 payload 看格式 —— 头文件只写 *"network configs"*，**没写编码** |
-| **V8** | **libzt 是否真的不建系统网卡、也无法与 `VpnService` / `NEPacketTunnelProvider` 对接** | **极高 —— 决定客户端形态** | 最小工程：`zts_node_start()` 后 `ifconfig` / `ip addr` 看有没有多出接口；再确认有没有原始包 fd 可拿 |
+| ~~V8~~ | ~~libzt 是否真的不建系统网卡、也无法与 `VpnService` / `NEPacketTunnelProvider` 对接~~ | ✅ **已从源码核实（2026-09）** | 唯一的「网卡」是 `src/VirtualTap.cpp` —— 纯 lwIP 内部 netif；641 行里**没有任何 OS 设备操作**；`src/` 16 个文件里没有 osdep。**桌面端仍建议实测一次兜底** |
 
-> **V8 现在排在最前面，顺序建议是 V8 → V1 → V2。**
-> V1 决定「libzt 能不能用」，而 V8 决定「**客户端做成什么形态**」——
-> 后者会推翻前者的结论。如果 libzt 确实不建网卡，那么**无论 V1 成不成立，F1a 都得靠系统 VPN**，
-> 而 V2（出站链路绑定）的讨论也要重写。
+> **V8 的结论已经清楚：F1a 必须靠系统 VPN，libzt 包不了。** 证据见 §2.7。
+> 所以 **§8 阶段 0.5 的形态决策现在就有依据可以先做** —— 不必等 V1：
+> 要么接受「自写 VPN 扩展」的工作量（iOS 还需 Apple 批 entitlement），要么 v1 先只做桌面。
+>
+> 剩下的验证顺序：**V8 的桌面兜底实测 → V1 → V2。**
+> V1 决定「libzt 能不能用」（F4 依赖它），V2 决定「出站怎么绑链路」——
+> **而这两条现在都只影响 F4，不再影响 F1a 的形态**。
 >
 > **V1、V2 是一票否决级的**（V4、V6 已排除）。建议在写任何 UI 之前先验证 ——
 > 它们决定整个工程结构，越晚发现代价越大。
@@ -498,8 +547,8 @@ sudo zerotier-cli set <nwid> allowDNS=1
 
 | 阶段 | 内容 | 前置 |
 |---|---|---|
-| **0** | **验证 V8 → V1 → V2**（V8 先说清客户端要做成什么形态） | —— |
-| **0.5** | **形态决策**：走乙（自己写系统 VPN）还是 v1 先只做桌面 | V8 |
+| **0** | 验证 **V1 → V2**（V8 已从源码核实，只剩桌面兜底实测） | —— |
+| **0.5** | **形态决策**：走乙（自己写系统 VPN）还是 v1 先只做桌面 —— ✅ **依据已经有了**，见 §2.7 | V8 |
 | **1** | **入网 + DNS 客户端**：一台 macOS 跑通「加入网络 → 应用 DNS → `nas.ztio.internal` 解析并连上」 | V1、V7 |
 | **2** | 授权流程 + 状态可见（零账号体验闭环） | 阶段 1 |
 | **3** | 出口代理：两台桌面端（macOS ↔ Linux）跑通，客户端经 ZT 连到出口，出口用宿主机栈出网 | V2 |

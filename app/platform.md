@@ -11,11 +11,12 @@
 > 而且从外部完全看不出问题。详见 §4。
 
 > ⚠️ **但 §4 有一个前置问题**：它假设客户端是「libzt 用户态栈 + 出站要自己绑链路」的形态。
-> 而 libzt 很可能**根本不建系统网卡**（证据见 [`README.md`](README.md) §2.7，待 **V8** 验证）——
-> 如果 F1a 必须靠系统 VPN（`NEPacketTunnelProvider` / `VpnService`）兑现，
+> 而 libzt **已从源码核实不建系统网卡**（`src/VirtualTap.cpp` 是纯 lwIP 内部 netif，
+> 全文件没有任何 OS 设备操作；证据见 [`README.md`](README.md) §2.7）——
+> 而 F1a 必须靠系统 VPN（`NEPacketTunnelProvider` / `VpnService`）兑现，
 > 那时代理流量已经走系统路由，**§4 这一整套绑定做法要重写**。
 >
-> **先跑 V8，再读 §4。**
+> **先做 §2.7 的形态决策，再读 §4。**
 
 ---
 
