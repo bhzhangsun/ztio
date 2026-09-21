@@ -112,5 +112,10 @@ echo "    拿到它的人可以冒充你的 root 并签发世界更新。请存�
 echo
 echo "恢复方式："
 echo "    docker compose down"
-echo "    tar -xzf $OUT -C ${SERVER_DIR}/data/"
+echo "    tar -xzf $OUT -C $DATA_ROOT"
 echo "    docker compose up -d"
+echo
+echo "    ⚠️  解包目标必须是 $DATA_ROOT（.env 的 ZTIO_DATA_ROOT），"
+echo "        不是仓库里的目录 —— 归档内是 ./one/ 与 ./dist/，"
+echo "        解错地方会让容器看到空数据目录，进而生成全新的"
+echo "        identity 与 planet，所有已入网设备都会失联。"
