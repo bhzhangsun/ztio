@@ -260,3 +260,40 @@ DNS 服务器（`172.16.0.1`）**只在 ZT 网内可达**。设成全局 DNS 的
 > 或 `systemd-networkd` + `systemd-resolved` 自己做 per-interface resolver ——
 > 因为 **Linux 没有统一的 split-horizon DNS 机制**。
 > 这不影响移动端实现，但影响「你自己在 Linux 上怎么验证 DNS 生效」。
+
+### 7.5 Linux 上「不支持 managed DNS」到底是什么意思
+
+> ⚠️ **容易被误读成「Linux 不能当 DNS 客户端」。不是。**
+> 准确说法是：**ZeroTier 不帮你自动配。**
+
+官方原文两条：
+
+> *ZeroTier managed DNS is currently only supported on Windows, macOS, Android, and iOS.
+> **Linux support is forthcoming** but may be limited to common Linux DNS resolver configurations…*
+>
+> *If you're a Linux user, you may have noticed that the **allowDNS flag doesn't do much on it**.
+> This is because **Linux doesn't have a canonical way of doing split-horizon DNS**.*
+
+**机制上的原因**：Linux 上 `/etc/resolv.conf` 归谁管没有定论 ——
+`systemd-resolved`（该文件只是符号链接）/ NetworkManager / `resolvconf` / `dhcpcd` / 谁都不管。
+ZeroTier 直接写它会**覆盖掉别人的管理**，而它没法知道你机器上是哪一种。
+Windows 有 NRPT、macOS 有 SystemConfiguration，**Linux 没有统一的对应物**。
+
+**但 Linux 其实有，而且做得最好** —— `systemd-resolved` 的 **routing domain**：
+
+```bash
+resolvectl dns    <zt-iface> 172.16.0.1
+resolvectl domain <zt-iface> '~ztio.internal'
+```
+
+`~` 前缀 = routing-only domain：**只有这个域的查询走这块网卡的 DNS**，
+且不用作 search domain —— 这就是 macOS `NEDNSSettings.matchDomains` 的等价物。
+官方也推荐这条路（`systemd-networkd` + `systemd-resolved`），并为自动化提供了
+`zeronsd` / `zerotier-systemd-manager`。
+
+> **对家庭服务器这条几乎零影响**：它**自己就是** `172.16.0.1`，只需指向自己：
+> ```
+> nameserver 127.0.0.1
+> ```
+> ⚠️ 但 dnsmasq 要**双绑** —— 除了 `listen-address=172.16.0.1`，
+> 还要 `listen-address=127.0.0.1`，否则本机在 `127.0.0.1` 上根本没有监听。
