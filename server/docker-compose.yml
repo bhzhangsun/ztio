@@ -6,12 +6,6 @@
 #
 # 安全组入站规则：
 #   UDP 9993  —— 必须。planet 的线协议端口，不放行则全网设备互相找不到。
-#   UDP 9994  —— **可选**。这是 ztio-dns 容器自己的节点端口（它是这台机器上的
-#                第二个 ZeroTier 节点，9993 被 planet 占了）。
-#                不放行 = 那个成员与其它成员之间走 planet 中继：DNS 照常可用，
-#                因为 planet 与 DNS 容器在同一台机器上，多出来的一跳是本地环回。
-#                代价是①依赖 planet 活着 ②永远不自愈成直连。
-#                本部署选择不放行（中继模式）。见 README「ztio-dns」一节。
 # 不要放行 TCP 3443 / 3000 / 9993 —— 本编排不提供任何 HTTP 服务。
 
 services:
@@ -62,9 +56,6 @@ services:
       - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/one:/var/lib/zerotier-one
       # 对外分发的 planet。
       - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/dist:/dist
-      # ztio-dns 把节点地址写在这里 —— dns-setup 需要它才能把成员建对。
-      # 只读：planet 没有理由改这个文件。
-      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/run:/run/ztio:ro
 
     # ------------------------------------------------------------
     # 刻意不写的东西
@@ -77,73 +68,6 @@ services:
     # 大幅收窄：即使容器被攻破，也无法建虚拟网卡、无法改路由、无法挂载。
 
     mem_limit: 900m
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  # ============================================================
-  # ztio-dns —— 网络内部的静态 DNS
-  # ============================================================
-  # 为什么单独一个容器，以及为什么用 bridge 而不是 host，见 dns/Dockerfile 顶部。
-  # 一句话：planet 持有全网签名私钥，不该同时拥有「改网络」的能力。
-  ztio-dns:
-    build:
-      context: ./dns
-      args:
-        ZT_VERSION: "1.14.2"
-
-    image: ztio/dns:1.14.2
-    container_name: ztiodns
-    restart: unless-stopped
-
-    depends_on:
-      - ztplanet
-
-    # 叶子节点，跟普通客户端一样。躲在 NAT 后面是 ZeroTier 的常态。
-    # 换来的好处：NET_ADMIN 被限制在容器自己的网络命名空间里，够不到宿主机。
-    network_mode: bridge
-
-    environment:
-      # 要加入的网络。**建网之后**才填（.env 里那个 ZTIO_NWID）。
-      #
-      # 这里刻意不用 ${ZTIO_NWID:?...} 强制报错：网络是部署之后才创建的，
-      # 而 deploy.sh 会 `docker compose up -d` 整个编排 —— 强制报错会让
-      # **首次部署直接失败**（.env 从 .env.example 复制而来时它必然为空）。
-      # 留空时容器照常起来，只是不加入网络、没有可服务的接口，并在日志里说明。
-      ZTIO_NWID: "${ZTIO_NWID:-}"
-      # 9993 已被 planet 占用（host 网络），这里必须换一个。
-      ZTIO_DNS_ZT_PORT: "9994"
-      # 重读记录的间隔（秒）。DNS 是长驻进程，而成员名 / 新设备入网 /
-      # 取消授权都会写进 controller 的落盘数据 —— 不重读就得重启容器。
-      ZTIO_DNS_REFRESH: "30"
-
-    volumes:
-      # 自己的身份和数据目录，与 planet 完全分开。
-      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/dns:/var/lib/zerotier-one
-      # 只读：世界文件必须是我们自己的，否则节点会去连官方 root。
-      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/dist:/dist:ro
-      # 只读：DNS 的记录来源。不给 authtoken —— 为了读几个记录就把 controller
-      # 的最高权限凭据交给另一个容器，是把最小权限原则倒过来用。
-      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/one/controller.d/network:/ctr:ro
-      # 节点地址写在这里，供控制面脚本读取（跨容器 exec 很别扭）。
-      - ${ZTIO_DATA_ROOT:-/var/lib/ztio}/run:/run/ztio
-
-    # 发布到宿主机，对端才可能直连（还要安全组放行 9994 —— 缺一不可）。
-    # 不放行 = 走 planet 中继：DNS 照常可用，因为 planet 与这个容器同机，
-    # 多出来的一跳是本地环回。本部署就是这么跑的，见 README「ztio-dns」一节。
-    ports:
-      - "9994:9994/udp"
-
-    # 建虚拟网卡需要这两个。作用范围仅限本容器的网络命名空间。
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-
-    mem_limit: 256m
 
     logging:
       driver: json-file

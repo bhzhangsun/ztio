@@ -14,15 +14,18 @@
     ./member.py rm <地址...>             彻底移除成员
     ./member.py ip <地址> <IPv4>         给成员指定固定地址（覆盖自动分配）
     ./member.py ip <地址> --clear        清掉固定地址，回到自动分配
-    ./member.py name <地址> <名字>       给成员起名字（ztio-dns 的 A 记录用它）
-    ./member.py name <地址> --clear      清掉名字，DNS 里退回用地址前缀
+    ./member.py name <地址> <名字>       给成员起名字（DNS 记录的来源）
+    ./member.py name <地址> --clear      清掉名字，退回用地址前缀
 
 地址是 10 位十六进制，即设备的 ZeroTier 地址。设备第一次 join 时会出现在
 `pending` 里 —— 因为网络是 private=true，未授权就什么也做不了。
 
-`name` 不是装饰：ztio-dns 的 A 记录就是从成员名派生的（`<名字>.<zone>`），
+`name` 不是装饰：名字是 DNS 里 `<名字>.<zone>` 那部分的唯一来源，
 没有名字时才退化成 `<地址前 10 位>.<zone>`。所以给设备起名字，等于决定
 DNS 里能不能用人类可读的名字。
+
+> DNS 服务器本身**不在这个仓库里** —— 见 `README.md`「DNS」一节。
+> 这里只管 controller 侧的数据：成员名与固定地址。
 """
 
 import argparse
@@ -361,7 +364,7 @@ def main():
     p.add_argument("ip", nargs="?", help="IPv4 地址")
     p.add_argument("--clear", action="store_true", help="清掉固定地址")
 
-    p = sub.add_parser("name", help="给成员起名字（ztio-dns 的 A 记录用它）")
+    p = sub.add_parser("name", help="给成员起名字（DNS 记录的来源）")
     p.add_argument("addr", nargs=1)
     p.add_argument("name", nargs="?", help="名字，只允许 [A-Za-z0-9-]")
     p.add_argument("--clear", action="store_true", help="清掉名字，退回用地址前缀")

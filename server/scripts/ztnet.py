@@ -59,7 +59,6 @@ import ipaddress
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.request
 
@@ -188,7 +187,7 @@ class Controller:
         """让**某个**节点加入网络。
 
         默认是本进程直连的那个节点（容器内的 127.0.0.1:9993）。
-        node 用于指定别的节点 —— 例如 ztio-dns 容器里的那个。
+        node 用于指定另一个节点的管理 API 地址。
         """
         if node is None:
             return self._req("POST", "/network/" + nwid, {})
@@ -538,84 +537,6 @@ def dns_ip_in_pool(dns_ip, pools):
     return False
 
 
-def setup_dns_member(zt, nwid, dns_ip, name="dns", quiet=False):
-    """把 controller 这个节点自己加入网络，并固定占用 dns_ip。
-
-    为什么 DNS 必须是网络成员，而 controller 不需要：
-      controller 是**控制面** —— 客户端走 ZeroTier 自己的协议跟它说话，不发 IP 包，
-      所以它不必属于任何网络。
-      DNS 是**数据面** —— 客户端要往一个 IP（dns_ip:53）发 UDP 包。而 ZeroTier 里
-      一个 IP 要可达，必须映射到「和客户端同在某个网络里的成员」—— 对等连接
-      是按共同网络建立的。所以 DNS 必须真的在这个网络里。
-    """
-    addr = dns_node_address()
-
-    def say(m):
-        if not quiet:
-            print(m)
-
-    # 加入网络这件事由 ztio-dns 容器自己的 entrypoint 完成（它启动时会 join）。
-    # 这里**不**代它 join：那个节点的管理 API 用 allowManagementFrom 锁在容器内，
-    # 从外面发不进去 —— 那道锁是刻意加的，不该为了图省事放开。
-    #
-    # 所以这里只等成员档案出现。节点 join 时会向 controller 请求配置，
-    # controller 据此建立档案；档案有了，授权才有对象可写。
-    say("  → 等 DNS 节点的成员档案出现…")
-
-    # join 会触发一次 config 请求，controller 据此建立成员档案。
-    for _ in range(30):
-        try:
-            zt.member_get(nwid, addr)
-            break
-        except SystemExit:
-            time.sleep(1)
-    else:
-        raise Invalid(
-            "已发起加入，但 30 秒内没等到成员档案。\n"
-            "    网络是 private 的，成员档案要等节点请求配置后才建立。\n"
-            "    可以稍后重试：ztnet.py dns-setup " + nwid
-        )
-
-    say("  → 授权并固定地址 %s，名字设为 %r…" % (dns_ip, name))
-    zt.member_set(nwid, addr, {
-        "authorized": True,
-        "ipAssignments": [dns_ip],
-        "name": name,
-    })
-    return addr
-
-
-def dns_node_address():
-    """读 ztio-dns 容器的节点地址。
-
-    为什么不能再用 zt.status()["address"]：
-    那读的是 planet 自己的地址。DNS 是**另一个容器、另一个身份** ——
-    成员记录和 dns.servers 里要填的是 DNS 节点的地址，不是 planet 的。
-    填错了的症状是：成员记录看着正常，但那个地址永远不会有节点来认领。
-
-    地址由 ztio-dns 的 entrypoint 写到共享文件（跨容器 exec 很别扭，
-    而且从 planet 容器里 exec 另一个容器需要 docker socket —— 权限太大）。
-    """
-    import os
-    root = os.environ.get("ZTIO_DATA_ROOT", "/var/lib/ztio")
-    for path in (os.path.join(root, "run", "dns-node-address"),
-                 "/run/ztio/dns-node-address"):
-        try:
-            with open(path) as f:
-                a = f.read().strip()
-            if a:
-                return a
-        except OSError:
-            continue
-    raise Invalid(
-        "读不到 ztio-dns 的节点地址（找不到 dns-node-address 文件）。\n"
-        "    这个文件由 ztio-dns 容器启动时写入。先把它起来：\n"
-        "      docker compose up -d ztio-dns\n"
-        "      docker compose exec ztio-dns zerotier-cli info\n"
-        "    文件位置：<ZTIO_DATA_ROOT>/run/dns-node-address"
-    )
-
-
 def validate(payload, baseline):
     """请求之前的检查：字段在不在、类型对不对。"""
     allowed = set(writable_fields(baseline))
@@ -780,25 +701,29 @@ def cmd_fields(zt, args):
 
 
 def _finish_dns(zt, nwid, payload, args):
-    """create 的最后一步：把 DNS 装进新网络。
+    """create 的最后一步：把 DNS **配置**装进新网络。
 
-    刻意放在网络配置写完之后、且与回滚路径分开 —— DNS 装不上是「网络可用但
+    刻意放在网络配置写完之后、且与回滚路径分开 —— DNS 配不上是「网络可用但
     没有名字解析」，不该把整个网络删掉。
+
+    ⚠️ 这里**不启动任何 DNS 服务器**。本仓库只负责 controller 侧的两件事：
+    算出该用哪个地址、把 dns.domain / dns.servers 写进网络定义。
+    DNS 服务器本身由用户在跑服务的那台机器上自己起（见 README「DNS」一节）。
     """
     if getattr(args, "no_dns", False):
-        print("\n--no-dns：跳过 DNS 装配。")
+        print("\n--no-dns：跳过 DNS 配置。")
         return 0
 
     dns = payload.get("dns") or {}
     domain = dns.get("domain")
     if not domain:
-        print("\n⚠️ 没给 --dns-domain，跳过 DNS 装配 —— 没有 zone 无从应答。")
+        print("\n⚠️ 没给 --dns-domain，跳过 DNS 配置 —— 没有 zone 无从应答。")
         print("   稍后可补：ztnet.py dns-setup %s --domain xxx.internal" % nwid)
         return 0
 
     dns_ip = dns_ip_from_routes(payload.get("routes"))
     if not dns_ip:
-        print("\n❌ 要装 DNS，但 routes 里没有可用的 IPv4 网段，推不出地址。")
+        print("\n❌ 要配 DNS，但 routes 里没有可用的 IPv4 网段，推不出地址。")
         print("   DNS 必须占网段里的一个地址，客户端才访问得到。")
         print("   加一条局域网路由（--route 172.16.0.0/24），或用 --no-dns 明确不要。")
         return 1
@@ -809,29 +734,41 @@ def _finish_dns(zt, nwid, payload, args):
               % (ipaddress.ip_address(dns_ip) + 1))
         return 1
 
-    print("\n装配 DNS…")
+    print("\n写入 DNS 配置…")
     try:
-        setup_dns_member(zt, nwid, dns_ip,
-                         name=(getattr(args, "dns_name", None) or "dns"))
         merged = dict(dns)
         merged["servers"] = [dns_ip]
         zt.patch(nwid, {"dns": merged})
-        print("\n✅ DNS 已装入网络")
+        print("\n✅ DNS 配置已写入网络")
         print("   zone     : %s" % domain)
-        print("   地址     : %s  （网段第一个 IP，dns.servers 已指向它）" % dns_ip)
-        print("   自带记录 : dns.%s → %s" % (domain, dns_ip))
-        print("\n   客户端还要各自打开 —— ZeroTier 默认不接管 DNS：")
-        print("     sudo zerotier-cli set %s allowDNS=1" % nwid)
+        print("   服务地址 : %s  （网段第一个 IP，dns.servers 已指向它）" % dns_ip)
+        _print_dns_remaining(nwid, dns_ip)
         return 0
     except BaseException as e:
-        print("\n⚠️ DNS 装配失败：%s" % e)
-        print("   网络本身是好的，只是 DNS 没装上。稍后可重试：")
+        print("\n⚠️ DNS 配置写入失败：%s" % e)
+        print("   网络本身是好的，只是 DNS 没配上。稍后可重试：")
         print("   ztnet.py dns-setup %s --domain %s" % (nwid, domain))
         return 1
 
 
+def _print_dns_remaining(nwid, dns_ip):
+    """剩下两步**不在本仓库的职责范围内** —— 打印出来，免得以为已经装好了。"""
+    print()
+    print("   ⚠️ 到这里只完成了「告诉网络去哪查 DNS」。剩下两步要在")
+    print("      **跑 DNS 的那台机器**上做，本仓库不提供 DNS 服务器：")
+    print("      ① 把 %s 固定分配给它（在容器内跑）：" % dns_ip)
+    print("           member.py ip <那台设备的 ZeroTier 地址> %s" % dns_ip)
+    print("      ② 在它上面起 DNS 服务器并绑 %s:53" % dns_ip)
+    print()
+    print("   客户端还要各自打开 —— ZeroTier 默认不接管 DNS：")
+    print("     sudo zerotier-cli set %s allowDNS=1" % nwid)
+
+
 def cmd_dns_setup(zt, args):
-    """给已存在的网络补装 DNS（create 已自动做过，这里是补做入口）。"""
+    """给已存在的网络补写 DNS 配置（create 已自动做过，这里是补做入口）。
+
+    只写 dns.domain / dns.servers，不启动 DNS 服务器。
+    """
     nwid = need_nwid(zt, args.nwid)
     net = zt.get(nwid)
 
@@ -851,7 +788,6 @@ def cmd_dns_setup(zt, args):
     print("网络     : %s（%s）" % (nwid, net.get("name")))
     print("DNS 地址 : %s" % dns_ip)
     print()
-    setup_dns_member(zt, nwid, dns_ip, name=(args.name or "dns"))
 
     dns = dict(net.get("dns") or {})
     dns["servers"] = [dns_ip]
@@ -859,9 +795,9 @@ def cmd_dns_setup(zt, args):
         dns["domain"] = args.domain
     zt.patch(nwid, {"dns": dns})
 
-    print("\n✅ DNS 已装入网络")
+    print("\n✅ DNS 配置已写入网络")
     print("   dns = %s" % json.dumps(dns, ensure_ascii=False))
-    print("\n   客户端还要各自打开：sudo zerotier-cli set %s allowDNS=1" % nwid)
+    _print_dns_remaining(nwid, dns_ip)
     return 0
 
 
@@ -1002,11 +938,10 @@ def main():
     p.add_argument("--yes", action="store_true")
     p.set_defaults(fn=cmd_rm)
 
-    p = sub.add_parser("dns-setup", help="给已存在的网络补装 DNS")
+    p = sub.add_parser("dns-setup", help="给已存在的网络补写 DNS 配置")
     p.add_argument("nwid", nargs="?", help="不传时自动选唯一的网络")
     p.add_argument("--ip", metavar="地址", help="显式指定 DNS 占用的地址")
     p.add_argument("--domain", metavar="域名", help="同时设置 dns.domain")
-    p.add_argument("--name", metavar="名字", help="DNS 成员的名字（默认 dns）")
     p.set_defaults(fn=cmd_dns_setup)
 
     args = ap.parse_args()
