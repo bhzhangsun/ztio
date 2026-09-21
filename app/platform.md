@@ -10,6 +10,13 @@
 > 但在出口代理的设计里，出口如果不把出站绑到正确的链路，整个代理等于白做 ——
 > 而且从外部完全看不出问题。详见 §4。
 
+> ⚠️ **但 §4 有一个前置问题**：它假设客户端是「libzt 用户态栈 + 出站要自己绑链路」的形态。
+> 而 libzt 很可能**根本不建系统网卡**（证据见 [`README.md`](README.md) §2.7，待 **V8** 验证）——
+> 如果 F1a 必须靠系统 VPN（`NEPacketTunnelProvider` / `VpnService`）兑现，
+> 那时代理流量已经走系统路由，**§4 这一整套绑定做法要重写**。
+>
+> **先跑 V8，再读 §4。**
+
 ---
 
 ## 1. 权限矩阵
@@ -197,3 +204,58 @@ Inet6Address addr;  // 已带 scope，直接用
 | 绑定出口接口 | ✅ 进程级 | ⚠️ 仅 Network.framework | ✅ |
 | libzt 支持 | ✅ | ✅ | ✅ |
 | 后台保持连接 | ⚠️ 需前台服务 | ❌ 会被挂起 | ✅ |
+| **改系统 DNS（split DNS）** | ⚠️ 有 DNS，但**无 per-domain** | ✅ `NEDNSSettings` + `matchDomains` | ✅ 同左 |
+| **自建系统 VPN 接口** | ✅ `VpnService` | ⚠️ `NEPacketTunnelProvider`，**entitlement 需 Apple 批准** | ✅ |
+| **libzt 让 ZT 地址可达的范围** | **仅本进程的 socket** | **仅本进程的 socket** | **仅本进程的 socket** |
+
+> 最后一行是 §2.7 那条发现的平台视角：**三端都一样**，libzt 只服务它自己的 socket。
+
+---
+
+## 7. DNS 客户端（P0）
+
+**这是 F1a 在客户端侧的另一半，也是平台差异第二大的一块**（第一大是 §4 的出站绑定）。
+
+### 7.1 必须 split DNS，不能全局设
+
+DNS 服务器（`172.16.0.1`）**只在 ZT 网内可达**。设成全局 DNS 的后果：
+
+> 用户离开家、或断掉 ZT 的那一刻，**整台设备的域名解析全挂** —— 包括他正在打开的网页。
+
+所以必须限定到 `dns.domain` 这一个域。
+
+| 平台 | 做法 | 结论 |
+|---|---|---|
+| **macOS** | `NEDNSSettings` + `matchDomains = ["ztio.internal"]`，挂在 `NEPacketTunnelProvider` 的 `NEPacketTunnelNetworkSettings` 上 | ✅ 有真正的 split DNS |
+| **iOS** | 同上 | ✅ |
+| **Android** | `VpnService.Builder.addDnsServer()` | ⚠️ **见 7.2** |
+
+### 7.2 ⚠️ Android 没有 per-domain DNS
+
+`VpnService.Builder` 只有 `addDnsServer()` / `addSearchDomain()`，
+**没有**「只对这个域用这个 DNS」的能力。而 VPN 存在时它就是**默认网络**，
+所以它的 DNS 会接管**所有**查询。
+
+| 做法 | 评价 |
+|---|---|
+| **让 ZT 侧的 DNS 服务器同时转发公网查询** | ✅ **最干净**，用户无感。代价：所有 DNS 查询都绕一趟家里 |
+| 只在 ZT 网络 active 时启用 VPN DNS | 可接受，但用户会看到 DNS 在切换 |
+| 不管 | ❌ 用户离开家就上不了网 |
+
+★ **第一行反过来说明了一件事**：家里的 DNS 服务器（dnsmasq）**必须能转发**，
+不能只答 `ztio.internal`。这也顺带解释了为什么 dnsmasq 是对的选择 —— **它本来就是转发器**。
+
+### 7.3 应用 DNS 的判据
+
+**`dns.servers` 非空才动作。** 只看 `domain` 会让「半个域名」去问公网 DNS，产生极难排查的怪异解析。
+四种组合的完整表格见 [`README.md`](README.md) §2.6。
+
+### 7.4 `allowDNS` 在 libzt 里不存在
+
+官方客户端那个 `allowDNS=1` 开关**在 libzt 里没有对应物**，libzt 也不会碰宿主机 resolver。
+**这段逻辑必须 app 自己写**，不是「打开一个开关」。详见 [`README.md`](README.md) §2.6。
+
+> 顺带一条会影响你调试环境的：ZeroTier 官方给 Linux 用户的答案是 `zeronsd`
+> 或 `systemd-networkd` + `systemd-resolved` 自己做 per-interface resolver ——
+> 因为 **Linux 没有统一的 split-horizon DNS 机制**。
+> 这不影响移动端实现，但影响「你自己在 Linux 上怎么验证 DNS 生效」。
